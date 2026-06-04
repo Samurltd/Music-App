@@ -1,0 +1,25 @@
+# Buildozer & Android build outputs
+.buildozer/
+bin/
+*.apk
+*.aab
+
+# Python caching & environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+venv/
+ENV/
+build_env/
+
+# Local media storage caches & dynamic configurations
+music_cache/
+.state.db
+state.db
+
+# Developer IDE settings
+.vscode/
+.idea/
+.DS_Store

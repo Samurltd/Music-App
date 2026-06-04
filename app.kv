@@ -1,0 +1,422 @@
+#:kivy 2.0
+
+<SelectableResultButton>:
+    size_hint_y: None
+    height: dp(56)
+    text_size: self.width - dp(32), None
+    halign: 'left'
+    valign: 'center'
+    on_release: app.root.select_result(self.result_index)
+    background_color: (0.2, 0.2, 0.2, 0.8)
+    bold: True
+    font_size: '13sp'
+    canvas.before:
+        Color:
+            rgba: (0.15, 0.15, 0.15, 1) if self.state == 'normal' else (0.3, 0.6, 1, 0.8)
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(8)]
+
+<MusicSearchLayout>:
+    canvas.before:
+        Color:
+            rgba: (1, 1, 1, 1)
+        Rectangle:
+            size: self.size
+            pos: self.pos
+        Color:
+            rgba: (0.1, 0.1, 0.15, 0.95)
+        Rectangle:
+            size: self.size
+            pos: self.pos
+    
+    orientation: 'vertical'
+    padding: dp(16)
+    spacing: dp(12)
+
+    # Header
+    BoxLayout:
+        size_hint_y: None
+        height: dp(48)
+        canvas:
+            Color:
+                rgba: (0.2, 0.6, 1, 0.9)
+            RoundedRectangle:
+                pos: self.pos
+                size: self.size
+                radius: [dp(12)]
+        
+        Label:
+            text: 'Music Search by 𝒮. ℬℯ𝓃'
+            size_hint_y: 1
+            halign: 'center'
+            valign: 'center'
+            text_size: self.width, self.height
+            bold: True
+            font_size: '16sp'
+            color: (1, 1, 1, 1)
+
+    # Search Box
+    BoxLayout:
+        size_hint_y: None
+        height: dp(56)
+        spacing: dp(8)
+        canvas:
+            Color:
+                rgba: (0.15, 0.15, 0.2, 0.8)
+            RoundedRectangle:
+                pos: self.pos
+                size: self.size
+                radius: [dp(10)]
+
+        TextInput:
+            id: search_input
+            text: root.search_query
+            hint_text: '🔍 Search song or artist...'
+            multiline: False
+            on_text: root.search_query = self.text
+            on_text_validate: root.on_search_button()
+            background_color: (0.1, 0.1, 0.15, 0)
+            hint_text_color: (0.7, 0.7, 0.7, 0.6)
+            foreground_color: (1, 1, 1, 1)
+            font_size: '13sp'
+
+        Button:
+            text: '🔍 Search'
+            size_hint_x: None
+            width: dp(110)
+            on_release: root.on_search_button()
+            background_color: (0.2, 0.6, 1, 0.9)
+            canvas.before:
+                Color:
+                    rgba: self.background_color
+                RoundedRectangle:
+                    pos: self.pos
+                    size: self.size
+                    radius: [dp(8)]
+
+    # Background Image Display
+    Image:
+        source: root.background_image
+        size_hint_y: 0.25
+        allow_stretch: True
+        keep_ratio: True
+        canvas.before:
+            Color:
+                rgba: (0.2, 0.2, 0.25, 1)
+            RoundedRectangle:
+                pos: self.pos
+                size: self.size
+                radius: [dp(12)]
+
+    # Results List
+    BoxLayout:
+        orientation: 'vertical'
+        size_hint_y: 0.3
+        spacing: dp(6)
+        canvas:
+            Color:
+                rgba: (0.12, 0.12, 0.16, 0.8)
+            RoundedRectangle:
+                pos: self.pos
+                size: self.size
+                radius: [dp(12)]
+
+        Label:
+            text: f'Search Results ({len(root.results)} found)'
+            size_hint_y: None
+            height: dp(28)
+            halign: 'center'
+            valign: 'center'
+            text_size: self.width, self.height
+            bold: True
+            font_size: '12sp'
+            color: (0.5, 0.8, 1, 1)
+
+        RecycleView:
+            id: results_rv
+            viewclass: 'SelectableResultButton'
+            data: root.rv_data
+            scroll_type: ['bars']
+            bar_width: dp(6)
+
+            RecycleBoxLayout:
+                default_size: None, dp(56)
+                default_size_hint: 1, None
+                size_hint_y: None
+                height: self.minimum_height
+                orientation: 'vertical'
+                spacing: dp(6)
+                padding: dp(8)
+
+    # Status Box
+    BoxLayout:
+        size_hint_y: None
+        height: dp(48)
+        canvas:
+            Color:
+                rgba: (0.15, 0.25, 0.2, 0.7)
+            RoundedRectangle:
+                pos: self.pos
+                size: self.size
+                radius: [dp(8)]
+
+        Label:
+            text: root.status_text
+            halign: 'center'
+            valign: 'center'
+            text_size: self.width, self.height
+            font_size: '12sp'
+            color: (0.7, 1, 0.7, 1)
+
+    # Now Playing Section
+    BoxLayout:
+        orientation: 'vertical'
+        size_hint_y: 0.15
+        spacing: dp(6)
+        padding: dp(12)
+        canvas:
+            Color:
+                rgba: (0.15, 0.15, 0.2, 0.85)
+            RoundedRectangle:
+                pos: self.pos
+                size: self.size
+                radius: [dp(12)]
+
+        Label:
+            text: '♫ ' + root.current_track_title
+            size_hint_y: None
+            height: dp(28)
+            halign: 'center'
+            valign: 'middle'
+            text_size: self.width, self.height
+            bold: True
+            font_size: '14sp'
+            color: (0.2, 1, 0.8, 1)
+
+        Slider:
+            min: 0
+            max: root.progress_max
+            value: root.progress_value
+            size_hint_y: None
+            height: dp(4)
+            on_value: root.on_progress_slider_release(self.value)
+            canvas.before:
+                Color:
+                    rgba: (0.2, 0.6, 1, 0.8)
+
+        Label:
+            text: root.progress_text
+            size_hint_y: None
+            height: dp(16)
+            halign: 'center'
+            valign: 'middle'
+            text_size: self.width, self.height
+            font_size: '10sp'
+            color: (0.8, 0.8, 0.8, 0.8)
+
+    # Navigation Controls
+    BoxLayout:
+        size_hint_y: None
+        height: dp(48)
+        spacing: dp(4)
+        canvas:
+            Color:
+                rgba: (0.15, 0.15, 0.2, 0.8)
+            RoundedRectangle:
+                pos: self.pos
+                size: self.size
+                radius: [dp(10)]
+        padding: dp(4)
+
+        Button:
+            text: '⏮ Prev'
+            size_hint_x: 0.14
+            on_release: root.select_previous_result()
+            background_color: (0.25, 0.35, 0.5, 0.9)
+            canvas.before:
+                Color:
+                    rgba: self.background_color
+                RoundedRectangle:
+                    pos: self.pos
+                    size: self.size
+                    radius: [dp(6)]
+
+        Button:
+            text: '▶ Play'
+            size_hint_x: 0.14
+            on_release: root.play_current_result()
+            background_color: (0.2, 0.7, 0.3, 0.9)
+            canvas.before:
+                Color:
+                    rgba: self.background_color
+                RoundedRectangle:
+                    pos: self.pos
+                    size: self.size
+                    radius: [dp(6)]
+
+        Button:
+            text: 'Next ⏭'
+            size_hint_x: 0.14
+            on_release: root.select_next_result()
+            background_color: (0.25, 0.35, 0.5, 0.9)
+            canvas.before:
+                Color:
+                    rgba: self.background_color
+                RoundedRectangle:
+                    pos: self.pos
+                    size: self.size
+                    radius: [dp(6)]
+
+        Button:
+            text: '🎲 Random'
+            size_hint_x: 0.14
+            on_release: root.play_random_song()
+            background_color: (0.6, 0.3, 0.7, 0.9)
+            canvas.before:
+                Color:
+                    rgba: self.background_color
+                RoundedRectangle:
+                    pos: self.pos
+                    size: self.size
+                    radius: [dp(6)]
+
+        Button:
+            text: '⏸ Pause'
+            size_hint_x: 0.14
+            on_release: root.pause_audio()
+            background_color: (0.7, 0.5, 0.2, 0.9)
+            canvas.before:
+                Color:
+                    rgba: self.background_color
+                RoundedRectangle:
+                    pos: self.pos
+                    size: self.size
+                    radius: [dp(6)]
+
+        Button:
+            text: '⏹ Stop'
+            size_hint_x: 0.14
+            on_release: root.stop_audio()
+            background_color: (0.8, 0.3, 0.3, 0.9)
+            canvas.before:
+                Color:
+                    rgba: self.background_color
+                RoundedRectangle:
+                    pos: self.pos
+                    size: self.size
+                    radius: [dp(6)]
+
+    # File Browser Section
+    BoxLayout:
+        orientation: 'horizontal'
+        size_hint_y: 0.35
+        spacing: dp(8)
+
+        BoxLayout:
+            orientation: 'vertical'
+            spacing: dp(6)
+            canvas:
+                Color:
+                    rgba: (0.12, 0.12, 0.16, 0.8)
+                RoundedRectangle:
+                    pos: self.pos
+                    size: self.size
+                    radius: [dp(12)]
+            padding: dp(8)
+
+            BoxLayout:
+                size_hint_y: None
+                height: dp(40)
+                spacing: dp(3)
+
+                Button:
+                    text: '📁 Music Folder'
+                    size_hint_x: 0.5
+                    on_release: root.on_browse_music()
+                    background_color: (0.3, 0.4, 0.6, 0.9)
+                    canvas.before:
+                        Color:
+                            rgba: self.background_color
+                        RoundedRectangle:
+                            pos: self.pos
+                            size: self.size
+                            radius: [dp(6)]
+
+                Button:
+                    text: '💾 Internal'
+                    size_hint_x: 0.5
+                    on_release: root.on_browse_internal_memory()
+                    background_color: (0.4, 0.5, 0.7, 0.9)
+                    canvas.before:
+                        Color:
+                            rgba: self.background_color
+                        RoundedRectangle:
+                            pos: self.pos
+                            size: self.size
+                            radius: [dp(6)]
+
+            Label:
+                text: root.browse_path
+                size_hint_y: None
+                height: dp(24)
+                halign: 'left'
+                valign: 'middle'
+                text_size: self.width, self.height
+                font_size: '9sp'
+                color: (0.6, 0.8, 1, 0.8)
+
+            FileChooserListView:
+                path: root.browse_path
+                filters: root.file_filters
+                on_selection: root.on_file_selected(self.selection)
+                multiselect: False
+
+        BoxLayout:
+            orientation: 'vertical'
+            size_hint_x: 0.35
+            spacing: dp(6)
+            padding: dp(8)
+            canvas:
+                Color:
+                    rgba: (0.12, 0.12, 0.16, 0.8)
+                RoundedRectangle:
+                    pos: self.pos
+                    size: self.size
+                    radius: [dp(12)]
+
+            Label:
+                text: 'Selected File'
+                size_hint_y: None
+                height: dp(28)
+                halign: 'center'
+                valign: 'center'
+                text_size: self.width, self.height
+                bold: True
+                font_size: '11sp'
+                color: (0.5, 0.8, 1, 1)
+
+            Label:
+                text: root.selected_file if root.selected_file else '📭 No file'
+                halign: 'center'
+                valign: 'top'
+                text_size: self.width, self.height
+                shorten: True
+                shorten_from: 'center'
+                font_size: '10sp'
+                color: (0.8, 0.8, 0.8, 0.8)
+
+            Button:
+                text: '▶ Play File'
+                size_hint_y: None
+                height: dp(40)
+                on_release: root.play_selected_file()
+                background_color: (0.2, 0.6, 1, 0.9)
+                canvas.before:
+                    Color:
+                        rgba: self.background_color
+                    RoundedRectangle:
+                        pos: self.pos
+                        size: self.size
+                        radius: [dp(6)]
