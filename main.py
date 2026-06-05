@@ -1,16 +1,48 @@
+import json
 import os
 import threading
 
 from kivy.app import App
 from kivy.clock import mainthread, Clock
 from kivy.lang import Builder
+from kivy.factory import Factory
 from kivy.properties import ListProperty, NumericProperty, StringProperty
-from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.button import Button
 from kivy.utils import platform
 
 import player
 import search
+
+# 1. Force Kivy to target your modern layout file exclusively
+Builder.load_file(os.path.join(os.path.dirname(__file__), "app_modern.kv"))
+
+# Inject the standard os module directly into the Kivy KV context parser
+Factory.register('os', module=os)
+
+# Android Specific Process Bridge Interfacing Classes
+if platform == "android":
+    from jnius import PythonJavaClass, java_method, autoclass
+    
+    class UIUpdateReceiver(PythonJavaClass):
+        __javainterfaces__ = ['android/content/BroadcastReceiver']
+
+        def __init__(self, callback):
+            super().__init__()
+            self.callback = callback
+
+        @java_method('(Landroid/content/Context;Landroid/content/Intent;)V')
+        def onReceive(self, context, intent):
+            try:
+                is_playing = intent.getBooleanExtra("is_playing", False)
+                position = intent.getIntExtra("position", 0)
+                duration = intent.getIntExtra("duration", 0)
+                title = intent.getStringExtra("title")
+                
+                # Dispatches native metrics back onto Kivy's loop safely
+                self.callback(is_playing, position, duration, title)
+            except Exception as e:
+                print(f"Error handling UI data broadcast update: {e}")
 
 
 class SelectableResultButton(Button):
@@ -18,195 +50,66 @@ class SelectableResultButton(Button):
     result_index = NumericProperty(0)
 
 
-class MusicSearchLayout(BoxLayout):
-    search_query = StringProperty("")
-    status_text = StringProperty("Ready")
-    rv_data = ListProperty([])
-    selected_index = NumericProperty(-1)
-    browse_path = StringProperty(os.path.expanduser("~"))
-    selected_file = StringProperty("")
-    file_filters = ListProperty(["*.mp3", "*.wav", "*.ogg", "*.m4a", "*.flac", "*.aac", "*.opus"])
+# =========================================================================
+# INTERFACE 1: THE MUSIC PLAYER SCREEN (Audio Deck Controls)
+# =========================================================================
+class PlayerScreen(Screen):
     current_track_title = StringProperty("No track playing")
+    status_text = StringProperty("Ready")
     progress_value = NumericProperty(0)
     progress_max = NumericProperty(100)
     progress_text = StringProperty("0:00 / 0:00")
     background_image = StringProperty("")
-    results = []
-    progress_update_event = None
-    result_index = NumericProperty(0)
-
-    def on_search_button(self):
-        """Dispatches local, online, and YouTube recommendation search operations safely."""
-        query = self.search_query.strip()
-        if not query:
-            self.set_status("Type a song name or artist before searching.")
-            return
-
-        self.set_status("Searching music libraries and recommendations...")
-        threading.Thread(target=self._perform_search, args=(query,), daemon=True).start()
-
-    def _perform_search(self, query):
-        """Cross-checks local indexing and appends online + YouTube recommendation results."""
-        combined = []
-        
-        # 1. Check Local Storage Folders
-        available_folders = search.get_available_local_music_folders()
-        if available_folders:
-            local_results = search.search_local(query)
-            if local_results:
-                combined.extend(local_results)
-
-        # 2. Query Standard Online Engine
-        try:
-            online_results = search.search_online(query)
-            if online_results:
-                combined.extend(online_results)
-        except Exception:
-            pass
-
-        # 3. Query YouTube Recommendations Engine
-        try:
-            self.set_status("Fetching YouTube recommendations...")
-            youtube_results = search.fetch_youtube_recommendations(query)
-            if youtube_results:
-                combined.extend(youtube_results)
-        except Exception:
-            pass
-
-        # Update UI if any combined results exist
-        if combined:
-            self.update_results(combined)
-            self.set_status(f"Found {len(combined)} tracks & recommendations. Tap to play.")
-            return
-
-        # Fallback to random track if absolute failure occurs
-        random_track = search.get_random_track()
-        if random_track:
-            self._play_random_track(
-                random_track,
-                f"No direct results found. Spinning up random asset: {random_track['title']}"
-            )
-            return
-
-        self.update_results([])
-        self.set_status("No results were found locally, online, or on YouTube.")
-        self._set_background_image(self._get_default_image())
-
-    @mainthread
-    def update_results(self, results):
-        """Populates UI list models smoothly back on the main loop thread."""
-        self.results = results
-        self.result_index = 0
-        self.rv_data = [
-            {"text": f"[{item['source'].upper()}] {item['title']}", "result_index": idx}
-            for idx, item in enumerate(results)
-        ]
-        self.selected_index = -1
-
-    @mainthread
-    def set_status(self, text):
-        self.status_text = text
-
-    def select_result(self, index):
-        if index < 0 or index >= len(self.results):
-            return
-        self.selected_index = index
-        self.play_selected()
-
-    def play_selected(self):
-        """Loads and processes playback streams, managing background service handover on Android."""
-        if self.selected_index < 0 or self.selected_index >= len(self.results):
-            self.set_status("Select a result first, or search again.")
-            return
-
-        item = self.results[self.selected_index]
-        track_path = item["path"]
-        
-        # Start the background audio engine container service on Android before triggering playback
-        if platform == "android":
-            self.start_android_audio_service(track_path)
-
-        success = player.player.play(track_path)
-        if success:
-            self.current_track_title = item['title']
-            self.set_status(f"Now playing: {item['title']} ({item['source']})")
-            self._start_progress_update()
-            self._fetch_and_set_artist_image(item['title'])
-        else:
-            self.set_status("Unable to stream or open the selected audio track.")
-
-    def start_android_audio_service(self, track_url):
-        """Starts the persistent background execution service on Android to bypass OS sleep limits."""
-        try:
-            from jnius import autoclass
-            service = autoclass('org.example.musicsearch.ServiceAudioservice')
-            activity = autoclass('org.kivy.android.PythonActivity').mActivity
-            # Pass the track URL to the background context loop execution lifecycle
-            service.start(activity, track_url)
-        except Exception as e:
-            print(f"Background Audio Service handoff error: {e}")
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.progress_update_event = None
+        self._is_seeking = False  # Flag preventing track updates while manually scrubbing
 
     def pause_audio(self):
-        player.player.pause()
-        self.set_status("Playback paused.")
+        if platform == "android":
+            App.get_running_app().start_android_audio_service({"type": "pause"})
+        else:
+            player.player.pause()
+            if player.player.is_playing():
+                self.status_text = "Playback playing."
+            else:
+                self.status_text = "Playback paused."
 
     def stop_audio(self):
-        player.player.stop()
-        self._stop_progress_update()
-        self.set_status("Playback stopped.")
-
-    @mainthread
-    def _play_random_track(self, random_track, message):
-        self.results = [random_track]
-        self.rv_data = [
-            {"text": f"{random_track['title']} ({random_track['source']})", "result_index": 0}
-        ]
-        self.selected_index = 0
-        self.play_selected()
-        self.set_status(message)
-
-    def play_random_song(self):
-        random_track = search.get_random_track()
-        if not random_track:
-            self.set_status("No tracks available to play randomly.")
-            return
-        self._play_random_track(random_track, f"Playing random track: {random_track['title']}")
-
-    def on_browse_music(self):
-        available_folders = search.get_available_local_music_folders()
-        if available_folders:
-            self.browse_path = available_folders[0]
-            self.set_status(f"Browsing: {self.browse_path}")
-        else:
-            self.browse_path = os.path.expanduser("~")
-            self.set_status("No local folders mapped. Opening Home directory.")
-
-    def on_file_selected(self, selection):
-        if selection:
-            self.selected_file = selection[0]
-            self.set_status(f"Selected: {os.path.basename(self.selected_file)}")
-        else:
-            self.selected_file = ""
-            self.set_status("No target file chosen.")
-
-    def play_selected_file(self):
-        if not self.selected_file or not os.path.isfile(self.selected_file):
-            self.set_status("Select a file from your storage directory first.")
-            return
-
         if platform == "android":
-            self.start_android_audio_service(self.selected_file)
-
-        success = player.player.play(self.selected_file)
-        if success:
-            self.current_track_title = os.path.basename(self.selected_file)
-            self.set_status(f"Now playing local file: {os.path.basename(self.selected_file)}")
-            self._start_progress_update()
+            App.get_running_app().start_android_audio_service({"type": "stop"})
         else:
-            self.set_status("The engine was unable to parse this specific file format.")
+            player.player.stop()
+            self._stop_progress_update()
+            self.progress_value = 0
+            self.progress_text = "0:00 / 0:00"
+            self.status_text = "Playback stopped."
+
+    def select_next_result(self):
+        if platform == "android":
+            App.get_running_app().start_android_audio_service({"type": "next"})
+        else:
+            search_screen = self.manager.get_screen('search_screen')
+            if not search_screen.results:
+                return
+            search_screen.result_index = (search_screen.result_index + 1) % len(search_screen.results)
+            search_screen.selected_index = search_screen.result_index
+            search_screen.play_selected()
+
+    def select_previous_result(self):
+        if platform == "android":
+            App.get_running_app().start_android_audio_service({"type": "previous"})
+        else:
+            search_screen = self.manager.get_screen('search_screen')
+            if not search_screen.results:
+                return
+            search_screen.result_index = (search_screen.result_index - 1) % len(search_screen.results)
+            search_screen.selected_index = search_screen.result_index
+            search_screen.play_selected()
 
     def _start_progress_update(self):
-        """Starts tracking timeline increments at fluid 100ms updates."""
+        """Starts tracking timeline increments at fluid 100ms updates (Non-Android Fallback)."""
         if self.progress_update_event:
             self.progress_update_event.cancel()
         self.progress_update_event = Clock.schedule_interval(self._update_progress, 0.1)
@@ -218,18 +121,27 @@ class MusicSearchLayout(BoxLayout):
             self.progress_update_event = None
 
     def _update_progress(self, dt):
-        """Tracks active sound progress metrics without stalling the UI thread framework."""
-        if not player.player.is_playing():
-            position = player.player.get_position()
-            length = player.player.get_length()
-            if position == 0 or position >= length:
-                self.progress_value = 0
-                self.progress_text = f"{self._format_time(0)} / {self._format_time(length)}"
-                self._stop_progress_update()
+        """Tracks active sound progress metrics without stalling the UI thread framework (Non-Android)."""
+        if platform == "android":
             return False
+
+        if self._is_seeking:
+            return True
 
         position = player.player.get_position()
         length = player.player.get_length()
+
+        if not player.player.is_playing():
+            # Keep clock alive waiting for the track initialization/buffering to settle
+            if length <= 0 or position == 0:
+                return True
+            
+            # End of audio track reached, clean slate UI
+            if position >= (length - 0.5):
+                self.progress_value = 0
+                self.progress_text = f"{self._format_time(0)} / {self._format_time(length)}"
+                self._stop_progress_update()
+                return False
 
         if length > 0:
             self.progress_value = int((position / length) * self.progress_max)
@@ -237,8 +149,23 @@ class MusicSearchLayout(BoxLayout):
         else:
             self.progress_value = 0
             self.progress_text = "0:00 / 0:00"
-
         return True
+
+    def on_progress_slider_touch_down(self):
+        """Intercepts track timer modification loops."""
+        if platform != "android":
+            self._is_seeking = True
+
+    def on_progress_slider_release(self, value):
+        """Handles manual audio scrubbing seek actions cleanly using explicit numeric mapping values."""
+        if platform == "android":
+            return
+        length = player.player.get_length()
+        if length > 0:
+            seek_pos = (value / self.progress_max) * length
+            player.player.seek(seek_pos)
+            self.progress_value = int(value)
+        self._is_seeking = False
 
     @staticmethod
     def _format_time(seconds):
@@ -246,94 +173,264 @@ class MusicSearchLayout(BoxLayout):
         secs = int(seconds) % 60
         return f"{mins}:{secs:02d}"
 
-    def on_progress_slider_release(self, value):
-        """Handles manual audio scrubbing seek actions cleanly using explicit numeric mapping values."""
-        length = player.player.get_length()
-        if length > 0:
-            seek_pos = (value / self.progress_max) * length
-            player.player.seek(seek_pos)
-            self.progress_value = int(value)
 
-    def select_next_result(self):
-        if not self.results:
+# =========================================================================
+# INTERFACE 2: THE MUSIC SEARCH & BROWSE SCREEN (Online & Local)
+# =========================================================================
+class SearchScreen(Screen):
+    search_query = StringProperty("")
+    status_text = StringProperty("Ready")
+    rv_data = ListProperty([])
+    selected_index = NumericProperty(-1)
+    browse_path = StringProperty(os.path.expanduser("~"))
+    selected_file = StringProperty("")
+    file_filters = ListProperty(["*.mp3", "*.wav", "*.ogg", "*.m4a", "*.flac", "*.aac", "*.opus"])
+    results = []
+    result_index = NumericProperty(0)
+
+    def on_search_button(self):
+        """Dispatches local, online, and YouTube recommendation search operations safely."""
+        query = self.search_query.strip()
+        if not query:
+            self.status_text = "Type a song name or artist before searching."
             return
-        self.result_index = (self.result_index + 1) % len(self.results)
-        self.selected_index = self.result_index
-        self._update_current_result_display()
 
-    def select_previous_result(self):
-        if not self.results:
+        self.status_text = "Searching music libraries and recommendations..."
+        threading.Thread(target=self._perform_search, args=(query,), daemon=True).start()
+
+    def _perform_search(self, query):
+        """Cross-checks local indexing and appends online + YouTube recommendation results."""
+        combined = []
+        
+        # 1. Check Local Storage Folders
+        try:
+            available_folders = search.get_available_local_music_folders()
+            if available_folders:
+                local_results = search.search_local(query)
+                if local_results:
+                    combined.extend(local_results)
+        except Exception:
+            pass
+
+        # 2. Query Standard Online Engine
+        try:
+            online_results = search.search_online(query)
+            if online_results:
+                combined.extend(online_results)
+        except Exception:
+            pass
+
+        # 3. Query YouTube Recommendations Engine
+        try:
+            youtube_results = search.fetch_youtube_recommendations(query)
+            if youtube_results:
+                combined.extend(youtube_results)
+        except Exception:
+            pass
+
+        if combined:
+            self.update_results(combined)
             return
-        self.result_index = (self.result_index - 1) % len(self.results)
-        self.selected_index = self.result_index
-        self._update_current_result_display()
 
-    def _update_current_result_display(self):
-        if 0 <= self.result_index < len(self.results):
-            item = self.results[self.result_index]
-            self.set_status(f"[{self.result_index + 1}/{len(self.results)}] {item['title']} [{item['source'].upper()}]")
+        # Fallback to random track if absolute failure occurs
+        try:
+            random_track = search.get_random_track()
+            if random_track:
+                self._play_random_track(random_track, f"No direct results found. Spun up asset: {random_track['title']}")
+                return
+        except Exception:
+            pass
 
-    def play_current_result(self):
-        if self.result_index < 0 or self.result_index >= len(self.results):
-            self.select_result(0)
+        self.update_results_empty()
+
+    @mainthread
+    def update_results(self, results):
+        """Populates UI list models smoothly back on the main loop thread."""
+        self.results = results
+        self.result_index = 0
+        self.rv_data = [
+            {"text": f"[{item['source'].upper()}] {item['title']}", "result_index": idx}
+            for idx, item in enumerate(results)
+        ]
+        self.selected_index = -1
+        self.status_text = f"Found {len(results)} tracks & recommendations. Tap to play."
+
+    @mainthread
+    def update_results_empty(self):
+        self.results = []
+        self.rv_data = []
+        self.status_text = "No results were found locally, online, or on YouTube."
+
+    def select_result(self, index):
+        if index < 0 or index >= len(self.results):
             return
-        self.selected_index = self.result_index
+        self.selected_index = index
+        self.result_index = index
         self.play_selected()
+
+    def play_selected(self):
+        """Loads and processes playback streams, managing background service handover on Android."""
+        if self.selected_index < 0 or self.selected_index >= len(self.results):
+            self.status_text = "Select a result first, or search again."
+            return
+
+        item = self.results[self.selected_index]
+        track_path = item["path"]
+        
+        player_screen = self.manager.get_screen('player_screen')
+        player_screen.current_track_title = item['title']
+        self._fetch_and_set_artist_image(item['title'])
+
+        if platform == "android":
+            payload_data = {
+                "type": "start",
+                "track_path": track_path,
+                "playlist": [res["path"] for res in self.results],
+                "titles": [res["title"] for res in self.results],
+                "index": self.selected_index,
+            }
+            App.get_running_app().start_android_audio_service(payload_data)
+        else:
+            player_screen.status_text = f"Now playing: {item['title']} ({item['source']})"
+            # Safeguard Desktop playback thread blocking for heavy streams
+            def non_android_play_async():
+                success = player.player.play(track_path)
+                self._apply_desktop_playback_status(success)
+                
+            threading.Thread(target=non_android_play_async, daemon=True).start()
+
+        # Auto-switch execution view seamlessly to the active player deck interface
+        self.manager.current = 'player_screen'
+
+    @mainthread
+    def _apply_desktop_playback_status(self, success):
+        player_screen = self.manager.get_screen('player_screen')
+        if success:
+            player_screen._start_progress_update()
+        else:
+            player_screen.status_text = "Unable to stream or open the selected audio track."
+
+    @mainthread
+    def _play_random_track(self, random_track, message):
+        self.results = [random_track]
+        self.rv_data = [{"text": f"{random_track['title']} ({random_track['source']})", "result_index": 0}]
+        self.selected_index = 0
+        self.result_index = 0
+        self.play_selected()
+        self.status_text = message
 
     def on_browse_internal_memory(self):
         internal_paths = ["/storage/emulated/0", "/sdcard", os.path.expanduser("~")]
         for path in internal_paths:
             if os.path.isdir(path):
                 self.browse_path = path
-                self.set_status(f"Browsing Storage: {path}")
+                self.status_text = f"Browsing Storage: {path}"
                 return
 
-    def _set_background_image(self, image_url):
-        if image_url:
-            self.background_image = image_url
+    def on_file_selected(self, selection):
+        if selection:
+            self.selected_file = selection[0]
+            self.status_text = f"Selected: {os.path.basename(self.selected_file)}"
         else:
-            self.background_image = self._get_default_image()
+            self.selected_file = ""
+            self.status_text = "No target file chosen."
 
-    def _get_default_image(self):
-        """Finds our customized dancing lion image file location."""
-        placeholder = os.path.join(os.path.dirname(__file__), "assets", "images", "dancing_lion.png")
-        if os.path.exists(placeholder):
-            return placeholder
-        return ""
+    def play_selected_file(self):
+        if not self.selected_file or not os.path.isfile(self.selected_file):
+            self.status_text = "Select a file from your storage directory first."
+            return
+
+        filename = os.path.basename(self.selected_file)
+        player_screen = self.manager.get_screen('player_screen')
+        player_screen.current_track_title = filename
+
+        if platform == "android":
+            payload_data = {
+                "type": "start",
+                "track_path": self.selected_file,
+                "playlist": [self.selected_file],
+                "titles": [filename],
+                "index": 0,
+            }
+            App.get_running_app().start_android_audio_service(payload_data)
+        else:
+            player_screen.status_text = f"Now playing local file: {filename}"
+            if player.player.play(self.selected_file):
+                player_screen._start_progress_update()
+            else:
+                player_screen.status_text = "The engine was unable to parse this file format."
+
+        self.manager.current = 'player_screen'
 
     def _fetch_and_set_artist_image(self, title, artist=""):
-        """Asynchronously updates background artwork without freezing operations."""
         def fetch():
             try:
                 image_url = search.fetch_artist_image(artist or title, title)
                 if image_url:
-                    self.background_image = image_url
+                    self.manager.get_screen('player_screen').background_image = image_url
             except Exception:
                 pass
         threading.Thread(target=fetch, daemon=True).start()
 
 
+# =========================================================================
+# INTERFACE 3: THE DEVELOPER SCREEN (Biography & Credentials)
+# =========================================================================
+class DeveloperScreen(Screen):
+    developer_name = StringProperty("Designed by S. Ben")
+    developer_role = StringProperty("Data, Mobile Solutions Engineer & Automation Architect")
+    developer_bio = StringProperty(
+        "Crafting clean cross-platform architectures and responsive mobile environments. "
+        "Tap below to review the baseline codebase, tracking mechanics, and full project deployment pipeline."
+    )
+    github_url = StringProperty("https://github.com/Samurltd")
+
+    def open_github(self):
+        """Safely dispatches a platform-aware system browser intent call."""
+        import webbrowser
+        webbrowser.open(self.github_url)
+
+
+# =========================================================================
+# THE ROOT APPLICATION APP CONTAINER
+# =========================================================================
 class MusicSearchApp(App):
     def build(self):
-        # Ensure targeted cache directories are created inside safe isolated storage path
         safe_dir = self.get_safe_cache_directory()
         os.makedirs(safe_dir, exist_ok=True)
         
-        # Dynamically load modern layout file definition
-        kv_path = os.path.join(os.path.dirname(__file__), "app_modern.kv")
-        if not os.path.exists(kv_path):
-            kv_path = os.path.join(os.path.dirname(__file__), "app.kv")
-        Builder.load_file(kv_path)
-        return MusicSearchLayout()
+        # Instantiate ScreenManager and orchestrate the multi-screen system
+        sm = ScreenManager()
+        sm.add_widget(PlayerScreen(name='player_screen'))
+        sm.add_widget(SearchScreen(name='search_screen'))
+        sm.add_widget(DeveloperScreen(name='developer_screen'))
+        return sm
 
     def get_safe_cache_directory(self):
-        """Returns the internal app data folder on Android to sidestep OS permission locks."""
         if platform == "android":
             return os.path.join(self.user_data_dir, "music_cache")
         return os.path.join(os.path.dirname(__file__), "music_cache")
 
+    def start_android_audio_service(self, payload_dict):
+        try:
+            from jnius import autoclass
+            service = autoclass('org.example.musicsearch.ServiceAudioservice')
+            activity = autoclass('org.kivy.android.PythonActivity').mActivity
+            service.start(activity, json.dumps(payload_dict))
+        except Exception as e:
+            print(f"Background Audio Service handoff error: {e}")
+
+    @mainthread
+    def handle_background_ui_update(self, is_playing, position, duration, title):
+        """Routes background Android service metrics straight onto the main PlayerScreen."""
+        player_screen = self.root.get_screen('player_screen')
+        player_screen.current_track_title = title
+        player_screen.progress_max = duration if duration > 0 else 100
+        player_screen.progress_value = position
+        player_screen.progress_text = f"{player_screen._format_time(position)} / {player_screen._format_time(duration)}"
+        player_screen.status_text = f"Now playing: {title}" if is_playing else "Playback paused"
+
     def on_start(self):
-        """Asks for targeted modern Android multimedia file read permissions."""
         if platform == "android":
             try:
                 from android.permissions import request_permissions, Permission
@@ -346,12 +443,27 @@ class MusicSearchApp(App):
                     
                 if permissions:
                     request_permissions(permissions)
-            except Exception:
-                pass
+                
+                from jnius import autoclass
+                Context = autoclass('android.content.Context')
+                IntentFilter = autoclass('android.content.IntentFilter')
+                activity = autoclass('org.kivy.android.PythonActivity').mActivity
+                
+                self.ui_receiver = UIUpdateReceiver(self.handle_background_ui_update)
+                filter_obj = IntentFilter('org.example.musicsearch.UI_UPDATE')
+                
+                # Android 14+ dynamic receiver context declarations (Not Exported)
+                try:
+                    receiver_flag = Context.RECEIVER_NOT_EXPORTED
+                    activity.registerReceiver(self.ui_receiver, filter_obj, receiver_flag)
+                except AttributeError:
+                    activity.registerReceiver(self.ui_receiver, filter_obj)
+                    
+                print("UI Update Broadcast listener attached successfully.")
+            except Exception as e:
+                print(f"Failed to hook up UI update communication channel layout: {e}")
 
     def on_pause(self):
-        # Returning True explicitly forces Android to retain our state while minimized,
-        # leaving our separate Service process to shoulder active audio rendering.
         return True
 
     def on_resume(self):

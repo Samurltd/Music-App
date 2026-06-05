@@ -21,17 +21,21 @@ android.api = 33
 android.minapi = 21
 android.ndk_api = 21
 android.archs = armeabi-v7a, arm64-v8a
-android.permissions = INTERNET, READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, READ_MEDIA_AUDIO
+
+# ADJUSTED: Added active Foreground Execution & Notification permissions 
+android.permissions = INTERNET, READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, READ_MEDIA_AUDIO, FOREGROUND_SERVICE, FOREGROUND_SERVICE_MEDIA_PLAYBACK, POST_NOTIFICATIONS
+
 android.bootstrap = sdl2
 android.extra_libs = ctypes
 
 # Background Worker Service Declaration
-services = AudioService:service.py
+# Keeps naming architecture mapped explicitly to match your main.py layout autoclass hook
+services = Audioservice:service.py
 
 [buildozer]
 log_level = 2
 warn_on_root = 1
 
 [app:android]
-# If you need to include additional Java libraries, add them here.
-# android.gradle_dependencies =
+# ADJUSTED: Pulled down AndroidX native media library cards to draw lock screen & shade widgets
+android.gradle_dependencies = "androidx.media:media:1.6.0"
