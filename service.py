@@ -109,7 +109,9 @@ def start_foreground_media_notification():
         builder.setContentTitle(title) \
                .setContentText("Media playback active in background") \
                .setSmallIcon(service.getApplicationInfo().icon) \
-               .setVisibility(1) # Notification.VISIBILITY_PUBLIC
+               .setVisibility(1) \
+               .setOngoing(True) \
+               .setOnlyAlertOnce(True)
                
         # Register notification button intent receiver
         _register_notification_receiver(service)

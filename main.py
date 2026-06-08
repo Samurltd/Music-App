@@ -423,9 +423,14 @@ class MusicSearchApp(App):
     def start_android_audio_service(self, payload_dict):
         try:
             from jnius import autoclass
-            service = autoclass('org.example.musicsearch.ServiceAudioservice')
             activity = autoclass('org.kivy.android.PythonActivity').mActivity
-            service.start(activity, json.dumps(payload_dict))
+            try:
+                service = autoclass('org.example.musicsearch.Audioservice')
+                service.start(activity, json.dumps(payload_dict))
+            except Exception:
+                # Fallback to the generic PythonService entrypoint when the named service class is unavailable.
+                python_service = autoclass('org.kivy.android.PythonService')
+                python_service.start(activity, json.dumps(payload_dict))
         except Exception as e:
             print(f"Background Audio Service handoff error: {e}")
 
