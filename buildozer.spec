@@ -50,10 +50,10 @@ android.ndk_api = 21
 # (list) The Android architectures to build for
 android.archs = armeabi-v7a, arm64-v8a
 
-# ADJUSTED: Mandatory media permissions for Android 13/14 (API 33/34)
-android.permissions = INTERNET, READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, READ_MEDIA_AUDIO, FOREGROUND_SERVICE, FOREGROUND_SERVICE_MEDIA_PLAYBACK, POST_NOTIFICATIONS
+# FIXED: Integrated READ_EXTERNAL_STORAGE to cleanly allow directory traversal across varying device ages
+android.permissions = INTERNET, READ_MEDIA_AUDIO, READ_EXTERNAL_STORAGE, FOREGROUND_SERVICE, FOREGROUND_SERVICE_MEDIA_PLAYBACK, POST_NOTIFICATIONS
 
-# ADJUSTED: Forces Android to respect legacy storage layouts if users run older device fallbacks
+# ADJUSTED: Enforces explicit application attributes for legacy fallback environments
 android.manifest_attributes = android:requestLegacyExternalStorage="true"
 
 # (str) Android bootstrap to use (sdl2 / webview)
@@ -62,9 +62,12 @@ android.bootstrap = sdl2
 # (list) List of extra libraries to include
 android.extra_libs = ctypes
 
-# Background Worker Service Declaration
-# Keeps naming architecture mapped explicitly to match your main.py layout autoclass hook
-android.services = Audioservice:service.py
+# FIX APPLIED: Corrected registration key token to map directly to service.py 
+android.services = myservice:service.py:foreground
+
+# FIXED: The correct property key name is android.manifest.service_attributes (singular 'service')
+# This successfully injects the explicit mediaPlayback flag into the XML manifest mapping framework.
+android.manifest.service_attributes = android:foregroundServiceType="mediaPlayback"
 
 # ADJUSTED: Kept perfectly on a single line so the Gradle wrapper parses the layout cleanly
 android.gradle_dependencies = androidx.media:media:1.6.0, androidx.core:core:1.12.0

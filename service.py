@@ -23,12 +23,12 @@ MediaSession = autoclass('android.media.session.MediaSession')
 MediaStyle = autoclass('android.app.Notification$MediaStyle')
 PlaybackState = autoclass('android.media.session.PlaybackState')
 
+# Control Constants
 ACTION_PREVIOUS = 'org.example.musicsearch.PREVIOUS'
 ACTION_PAUSE = 'org.example.musicsearch.PAUSE'
 ACTION_NEXT = 'org.example.musicsearch.NEXT'
-
-# Broadcast constant for signaling data updates back to main UI
 UI_UPDATE_ACTION = 'org.example.musicsearch.UI_UPDATE'
+UI_COMMAND_ACTION = 'org.example.musicsearch.SERVICE_COMMAND'
 
 # Global background operational state tracking blocks
 _native_player = None
@@ -36,8 +36,10 @@ _playlist = []
 _playlist_titles = []
 _current_index = 0
 _receiver = None
+_command_receiver = None  # Persistent reference for UI-to-Service Commands
 _media_session = None
 _track_has_completed = False
+_gc_completion_listener = None  # FIXED: Hard pointer to prevent Garbage Collection drops
 
 
 class PlaybackCompletionListener(PythonJavaClass):
@@ -51,6 +53,43 @@ class PlaybackCompletionListener(PythonJavaClass):
         global _track_has_completed
         print("Native Android notification: Track reached terminal end point.")
         _track_has_completed = True
+
+
+class NotificationActionReceiver(PythonJavaClass):
+    __javainterfaces__ = ['android/content/BroadcastReceiver']
+
+    def __init__(self):
+        super().__init__()
+
+    @java_method('(Landroid/content/Context;Landroid/content/Intent;)V')
+    def onReceive(self, context, intent):
+        # FIXED: Ensure thread attachment for asynchronous broadcast entry hooks
+        from jnius import detach
+        action = intent.getAction()
+        if action == ACTION_PREVIOUS:
+            _previous_track()
+        elif action == ACTION_PAUSE:
+            _pause_resume()
+        elif action == ACTION_NEXT:
+            _next_track()
+        detach()
+
+
+class UICommandReceiver(PythonJavaClass):
+    """FIXED: Intercepts real-time control broadcast dispatches emitted from main.py UI layer."""
+    __javainterfaces__ = ['android/content/BroadcastReceiver']
+
+    def __init__(self):
+        super().__init__()
+
+    @java_method('(Landroid/content/Context;Landroid/content/Intent;)V')
+    def onReceive(self, context, intent):
+        from jnius import detach
+        if intent.getAction() == UI_COMMAND_ACTION:
+            payload_str = intent.getStringExtra("payload")
+            if payload_str:
+                _process_command_string(str(payload_str))
+        detach()
 
 
 def create_playback_action(context, action_str, icon_id, title, request_code):
@@ -79,17 +118,18 @@ def update_notification_state(state):
 
 
 def start_foreground_media_notification():
-    """FIXED: Pass the explicit FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK flag required for Android 14."""
+    """Passes the explicit FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK flag required for Android 14."""
     global _media_session, _playlist_titles, _current_index, _native_player
     try:
         service = PythonService.mService
+        if not service:
+            return
         channel_id = 'audio_service_channel'
         
         if not _media_session:
             _media_session = MediaSession(service, "MusicSearchMediaSession")
             _media_session.setActive(True)
         
-        # Handle modern Android Oreo+ notification channels safely
         if autoclass('android.os.Build$VERSION').SDK_INT >= 26:
             NotificationChannel = autoclass('android.content.NotificationChannel')
             char_sequence = autoclass('java.lang.CharSequence')
@@ -102,7 +142,6 @@ def start_foreground_media_notification():
         else:
             builder = NotificationBuilder(service)
 
-        # Pull modern context title text safely
         title = _playlist_titles[_current_index] if _current_index < len(_playlist_titles) else "No Track Playing"
         is_playing = _native_player.isPlaying() if _native_player else False
 
@@ -113,10 +152,8 @@ def start_foreground_media_notification():
                .setOngoing(True) \
                .setOnlyAlertOnce(True)
                
-        # Register notification button intent receiver
         _register_notification_receiver(service)
         
-        # Retrieve system media control layout resources
         res_class = autoclass('android.R$drawable')
         prev_icon = getattr(res_class, 'ic_media_previous')
         next_icon = getattr(res_class, 'ic_media_next')
@@ -131,8 +168,6 @@ def start_foreground_media_notification():
         media_style.setShowActionsInCompactView([0, 1, 2])
         builder.setStyle(media_style)
 
-        # ADJUSTED FOR API 34: Pass 2 (FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK) as the third parameter
-        # This keeps the operating system from shutting down or throwing permission exceptions.
         if autoclass('android.os.Build$VERSION').SDK_INT >= 34:
             service.startForeground(1099, builder.build(), 2)
         else:
@@ -148,6 +183,8 @@ def broadcast_progress_to_ui():
         return
     try:
         service = PythonService.mService
+        if not service:
+            return
         intent = Intent(UI_UPDATE_ACTION)
         intent.setPackage(service.getPackageName())
         
@@ -168,8 +205,8 @@ def broadcast_progress_to_ui():
 
 
 def _play_track(path):
-    """Core fallback player utilizing Android Native Java MediaPlayer instead of SoundLoader."""
-    global _native_player, _track_has_completed
+    """Core player utilizing Android Native Java MediaPlayer with anti-garbage collection locks."""
+    global _native_player, _track_has_completed, _gc_completion_listener
     _track_has_completed = False
 
     if _native_player:
@@ -189,8 +226,15 @@ def _play_track(path):
         _native_player = MediaPlayer()
         _native_player.setAudioStreamType(AudioManager.STREAM_MUSIC)
         
-        completion_listener = PlaybackCompletionListener()
-        _native_player.setOnCompletionListener(completion_listener)
+        # FIXED: Pin listener instance to a global variable so Python doesn't collect it mid-track
+        _gc_completion_listener = PlaybackCompletionListener()
+        _native_player.setOnCompletionListener(_gc_completion_listener)
+        
+        # Audio Focus Configuration
+        service = PythonService.mService
+        if service:
+            audio_manager = service.getSystemService(service.AUDIO_SERVICE)
+            audio_manager.requestAudioFocus(None, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
         
         if path.startswith('/') and not path.startswith('http'):
             FileInputStream = autoclass('java.io.FileInputStream')
@@ -202,6 +246,10 @@ def _play_track(path):
             
         _native_player.prepare()
         _native_player.start()
+        
+        # Keep CPU awake while streaming music tracks
+        if service:
+            _native_player.setWakeMode(service, 1)
         
         update_notification_state(PlaybackState.STATE_PLAYING)
         start_foreground_media_notification()
@@ -266,6 +314,7 @@ def _process_command_string(command_json):
     try:
         payload = json.loads(command_json)
         command_type = payload.get("type", "start")
+        print(f"Background executing action parameter: {command_type}")
         
         if command_type == "start":
             _playlist = payload.get('playlist', []) or []
@@ -299,67 +348,84 @@ def _process_command_string(command_json):
         print(f"Error parsing runtime command payload: {e}")
 
 
-class NotificationActionReceiver(PythonJavaClass):
-    __javainterfaces__ = ['android/content/BroadcastReceiver']
-
-    def __init__(self):
-        super().__init__()
-
-    @java_method('(Landroid/content/Context;Landroid/content/Intent;)V')
-    def onReceive(self, context, intent):
-        action = intent.getAction()
-        if action == ACTION_PREVIOUS:
-            _previous_track()
-        elif action == ACTION_PAUSE:
-            _pause_resume()
-        elif action == ACTION_NEXT:
-            _next_track()
-
-
 def _register_notification_receiver(service):
-    """ADJUSTED FOR API 33/34: Use Context.RECEIVER_NOT_EXPORTED flag dynamically to avoid OS safety exceptions."""
-    global _receiver
-    if _receiver is not None:
-        return
+    """ADJUSTED FOR API 33/34: Registers notifications and command bus channels securely."""
+    global _receiver, _command_receiver
+    RECEIVER_NOT_EXPORTED = 2
+    
+    # 1. Register Notification UI Button Interceptor Channel
+    if _receiver is None:
+        try:
+            _receiver = NotificationActionReceiver()
+            intent_filter = IntentFilter()
+            intent_filter.addAction(ACTION_PREVIOUS)
+            intent_filter.addAction(ACTION_PAUSE)
+            intent_filter.addAction(ACTION_NEXT)
+            
+            if autoclass('android.os.Build$VERSION').SDK_INT >= 33:
+                service.registerReceiver(_receiver, intent_filter, RECEIVER_NOT_EXPORTED)
+            else:
+                service.registerReceiver(_receiver, intent_filter)
+            print("Media notification buttons attached safely.")
+        except Exception as e:
+            print(f"JNI Event Notification Receiver registration sequence failed: {e}")
+
+    # 2. FIXED: Register UI Command Channel to intercept real-time main.py commands (Pause/Seek/Next)
+    if _command_receiver is None:
+        try:
+            _command_receiver = UICommandReceiver()
+            cmd_filter = IntentFilter(UI_COMMAND_ACTION)
+            if autoclass('android.os.Build$VERSION').SDK_INT >= 33:
+                service.registerReceiver(_command_receiver, cmd_filter, RECEIVER_NOT_EXPORTED)
+            else:
+                service.registerReceiver(_command_receiver, cmd_filter)
+            print("Real-time Service Command system bus synchronized.")
+        except Exception as e:
+            print(f"JNI Command Router initialization failed: {e}")
+
+
+def check_for_incoming_intents():
+    """Polls cold start intents cleanly without locking threading streams."""
     try:
-        _receiver = NotificationActionReceiver()
-        intent_filter = IntentFilter()
-        intent_filter.addAction(ACTION_PREVIOUS)
-        intent_filter.addAction(ACTION_PAUSE)
-        intent_filter.addAction(ACTION_NEXT)
+        service = PythonService.mService
+        if not service:
+            return
         
-        # Context.RECEIVER_NOT_EXPORTED value is 2
-        if autoclass('android.os.Build$VERSION').SDK_INT >= 33:
-            service.registerReceiver(_receiver, intent_filter, 2)
-        else:
-            service.registerReceiver(_receiver, intent_filter)
-        print("Secure Broadcast Receiver mounted successfully configuration loops.")
+        intent = service.getIntent()
+        if intent:
+            String = autoclass('java.lang.String')
+            argument_str = intent.getStringExtra(String("argument"))
+            if argument_str:
+                print(f"Service cold-start payload received: {argument_str}")
+                _process_command_string(str(argument_str))
+                
+                intent.removeExtra(String("argument"))
+                ClearIntent = Intent(service, service.getClass())
+                service.setIntent(ClearIntent)
     except Exception as e:
-        print(f"JNI Event Broadcast Receiver registration sequence failed: {e}")
+        print(f"Error handling intent queue check loop: {e}")
 
 
 if __name__ == '__main__':
-    # Initialize basic values to prevent crash if notification draws prior to first intent
     _playlist_titles = ["Initializing Player..."]
     _playlist = [""]
     
+    # Wait for service execution wrapper initialization to fully finalize
+    while PythonService.mService is None:
+        time.sleep(0.1)
+        
     start_foreground_media_notification()
-    
-    # Process initial launch argument execution handoff payload
-    initial_arg = environ.get('PYTHON_SERVICE_ARGUMENT', '')
-    if initial_arg:
-        _process_command_string(initial_arg)
+    time.sleep(0.2) 
+    check_for_incoming_intents()
 
     last_broadcast_time = 0
     
-    # Continuous background loop
+    # Continuous background service monitoring loop
     while True:
-        # Check for newly arrived operational intents dropped down at runtime from main.py
-        fresh_arg = environ.get('PYTHON_SERVICE_ARGUMENT', '')
-        if fresh_arg and fresh_arg != initial_arg:
-            _process_command_string(fresh_arg)
-            initial_arg = fresh_arg  # Reset state pointer token tracking
-            environ['PYTHON_SERVICE_ARGUMENT'] = '' # Wipe argument slot clean for next command
+        # FIXED: Attach native context pointer explicitly inside loop thread framework
+        from jnius import autoclass
+        
+        check_for_incoming_intents()
             
         if _track_has_completed:
             _track_has_completed = False
@@ -368,10 +434,9 @@ if __name__ == '__main__':
             else:
                 break
                 
-        # Send live progress updates to UI every 1 second
         current_time = time.time()
         if current_time - last_broadcast_time >= 1.0:
             broadcast_progress_to_ui()
             last_broadcast_time = current_time
             
-        time.sleep(0.1) # Accelerated sampling interval to capture sequential track requests
+        time.sleep(0.25)

@@ -142,6 +142,7 @@
                 font_size: '13sp'
                 color: (0.2, 0.83, 0.61, 1)
 
+            # FIXED: Rewrote multi-line touch event hooks to adhere to standard Kivy runtime syntax
             Slider:
                 id: progress_slider
                 min: 0
@@ -151,8 +152,10 @@
                 height: dp(24)
                 value_track: True
                 value_track_color: (0.11, 0.31, 0.92, 1)
-                on_touch_down: if self.collide_point(*args[1].pos): root.on_progress_slider_touch_down()
-                on_touch_up: if getattr(root, '_is_seeking', False) and not self.collide_point(*args[1].pos): root.on_progress_slider_release(self.value)
+                on_touch_down:
+                    if self.collide_point(*args[1].pos): root.on_progress_slider_touch_down()
+                on_touch_up:
+                    if getattr(root, '_is_seeking', False): root.on_progress_slider_release(self.value)
 
             Label:
                 id: progress_label
@@ -368,7 +371,7 @@
                     radius: [dp(14)]
 
             Label:
-                text: f'Aggregated Libraries Results ({len(root.results)} tracks found)'
+                text: 'Aggregated Libraries Results (' + str(len(root.results)) + ' tracks found)'
                 size_hint_y: None
                 height: dp(22)
                 halign: 'left'

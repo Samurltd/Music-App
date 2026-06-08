@@ -20,10 +20,6 @@ Builder.load_file(os.path.join(os.path.dirname(__file__), "app_modern.kv"))
 # Inject the standard os module directly into the Kivy KV context parser
 Factory.register('os', module=os)
 
-# Android Native Intent Listener Initialization
-if platform == "android":
-    from android.broadcast import BroadcastReceiver
-
 
 class SelectableResultButton(Button):
     """Button for interactive list selections."""
@@ -124,11 +120,9 @@ class PlayerScreen(Screen):
         length = player.player.get_length()
 
         if not player.player.is_playing():
-            # Keep clock alive waiting for the track initialization/buffering to settle
             if length <= 0 or position == 0:
                 return True
             
-            # End of audio track reached, clean slate UI
             if position >= (length - 0.5):
                 self.progress_value = 0
                 self.progress_text = f"{self._format_time(0)} / {self._format_time(length)}"
@@ -144,11 +138,9 @@ class PlayerScreen(Screen):
         return True
 
     def on_progress_slider_touch_down(self):
-        """Intercepts track timer modification loops."""
         self._is_seeking = True
 
     def on_progress_slider_release(self, value):
-        """Handles manual audio scrubbing seek actions cleanly using explicit numeric mapping values."""
         if platform == "android":
             if self.progress_max > 0:
                 seek_pos_ms = int((value / 100) * (self.progress_max * 1000))
@@ -188,7 +180,6 @@ class SearchScreen(Screen):
     result_index = NumericProperty(0)
 
     def on_search_button(self):
-        """Dispatches local, online, and YouTube recommendation search operations safely."""
         query = self.search_query.strip()
         if not query:
             self.status_text = "Type a song name or artist before searching."
@@ -198,10 +189,7 @@ class SearchScreen(Screen):
         threading.Thread(target=self._perform_search, args=(query,), daemon=True).start()
 
     def _perform_search(self, query):
-        """Cross-checks local indexing and appends online + YouTube recommendation results."""
         combined = []
-        
-        # 1. Check Local Storage Folders
         try:
             available_folders = search.get_available_local_music_folders()
             if available_folders:
@@ -211,7 +199,6 @@ class SearchScreen(Screen):
         except Exception:
             pass
 
-        # 2. Query Standard Online Engine
         try:
             online_results = search.search_online(query)
             if online_results:
@@ -219,7 +206,6 @@ class SearchScreen(Screen):
         except Exception:
             pass
 
-        # 3. Query YouTube Recommendations Engine
         try:
             youtube_results = search.fetch_youtube_recommendations(query)
             if youtube_results:
@@ -231,11 +217,9 @@ class SearchScreen(Screen):
             self.update_results(combined)
             return
 
-        # Fallback to random track if absolute failure occurs
         self.play_random_fallback_track()
 
     def play_random_fallback_track(self):
-        """Bridges the gap for KV calls looking to spin up an automated asset fallback."""
         try:
             random_track = search.get_random_track()
             if random_track:
@@ -247,7 +231,6 @@ class SearchScreen(Screen):
 
     @mainthread
     def update_results(self, results):
-        """Populates UI list models smoothly back on the main loop thread."""
         self.results = results
         self.result_index = 0
         self.rv_data = [
@@ -271,7 +254,6 @@ class SearchScreen(Screen):
         self.play_selected()
 
     def play_selected(self):
-        """Loads and processes playback streams, managing background service handover on Android."""
         if self.selected_index < 0 or self.selected_index >= len(self.results):
             self.status_text = "Select a result first, or search again."
             return
@@ -300,7 +282,6 @@ class SearchScreen(Screen):
                 
             threading.Thread(target=non_android_play_async, daemon=True).start()
 
-        # Auto-switch execution view seamlessly to the active player deck interface
         self.manager.current = 'player_screen'
 
     @mainthread
@@ -321,12 +302,35 @@ class SearchScreen(Screen):
         self.status_text = message
 
     def on_browse_internal_memory(self):
+        """Triggers local memory storage traversal bounds cleanly."""
         internal_paths = ["/storage/emulated/0", "/sdcard", os.path.expanduser("~")]
+        target_path = None
+        
         for path in internal_paths:
             if os.path.isdir(path):
-                self.browse_path = path
-                self.status_text = f"Browsing Storage: {path}"
-                return
+                target_path = path
+                break
+                
+        if target_path:
+            self.browse_path = target_path
+            self.status_text = f"Browsing Storage: {target_path}"
+            
+            try:
+                file_chooser = self.ids.get('file_chooser')
+                if file_chooser:
+                    file_chooser.root_dir = target_path
+                    file_chooser.path = target_path
+                    
+                    def safe_ui_path_filter(directory, filename):
+                        restricted = {'data', 'system', 'vendor', 'root', 'sbin'}
+                        parts = directory.lower().split(os.sep)
+                        if any(res in parts for res in restricted) or filename.lower() in restricted:
+                            return False
+                        return True
+                        
+                    file_chooser.filters = [safe_ui_path_filter]
+            except Exception as e:
+                print(f"File chooser security configurations bypassed: {e}")
 
     def on_file_selected(self, selection):
         if selection:
@@ -391,7 +395,6 @@ class DeveloperScreen(Screen):
     github_url = StringProperty("https://github.com/Samurltd")
 
     def open_github(self):
-        """Safely dispatches a platform-aware system browser intent call."""
         import webbrowser
         webbrowser.open(self.github_url)
 
@@ -403,12 +406,12 @@ class MusicSearchApp(App):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.ui_receiver = None
+        self.native_receiver_instance = None  # Hard pointer to stop the Garbage Collector
 
     def build(self):
         safe_dir = self.get_safe_cache_directory()
         os.makedirs(safe_dir, exist_ok=True)
         
-        # Instantiate ScreenManager and orchestrate the multi-screen system
         sm = ScreenManager()
         sm.add_widget(PlayerScreen(name='player_screen'))
         sm.add_widget(SearchScreen(name='search_screen'))
@@ -421,21 +424,55 @@ class MusicSearchApp(App):
         return os.path.join(os.path.dirname(__file__), "music_cache")
 
     def start_android_audio_service(self, payload_dict):
+        if platform != "android":
+            return
+
         try:
             from jnius import autoclass
-            activity = autoclass('org.kivy.android.PythonActivity').mActivity
-            try:
-                service = autoclass('org.example.musicsearch.Audioservice')
-                service.start(activity, json.dumps(payload_dict))
-            except Exception:
-                # Fallback to the generic PythonService entrypoint when the named service class is unavailable.
-                python_service = autoclass('org.kivy.android.PythonService')
-                python_service.start(activity, json.dumps(payload_dict))
+            from android import mActivity
+            context = mActivity.getApplicationContext()
+            Intent = autoclass('android.content.Intent')
+            String = autoclass('java.lang.String')
+            
+            # Serialize payload dictionary to explicit JSON string to ensure clean parsing in search.py
+            payload_string = json.dumps(payload_dict)
+            
+            # If it's a structural playback alteration event, transmit via the open Broadcast channel
+            if payload_dict.get("type") != "start":
+                broadcast_intent = Intent('org.example.musicsearch.SERVICE_COMMAND')
+                broadcast_intent.setPackage(context.getPackageName()) 
+                broadcast_intent.putExtra(String("payload"), String(payload_string))
+                context.sendBroadcast(broadcast_intent)
+                print(f"Control command '{payload_dict.get('type')}' dispatched via Broadcast Channel.")
+                return
+
+            ServiceClass = None
+            namespaces = [
+                'org.example.musicsearch.ServiceMyservice',
+                'org.test.musicsearch.ServiceMyservice',
+                'org.kivy.android.PythonService'
+            ]
+            
+            for ns in namespaces:
+                try:
+                    ServiceClass = autoclass(ns)
+                    break
+                except Exception:
+                    continue
+
+            if not ServiceClass:
+                print("Background Audio Service initialization failed: Target namespaces unreachable.")
+                return
+
+            intent = Intent(context, ServiceClass)
+            # Match the default Kivy parameter token key argument setup seamlessly
+            intent.putExtra(String("argument"), String(payload_string))
+            context.startForegroundService(intent)
+            print("Background Cold-Start Intent deployed successfully to context branch.")
         except Exception as e:
             print(f"Background Audio Service handoff error: {e}")
 
     def _process_broadcast_intent(self, context, intent):
-        """Unpacks the background stream data and safely sends it to the handler."""
         try:
             is_playing = intent.getBooleanExtra("is_playing", False)
             position = intent.getIntExtra("position", 0)
@@ -448,60 +485,86 @@ class MusicSearchApp(App):
 
     @mainthread
     def handle_background_ui_update(self, is_playing, position, duration, title):
-        """Routes background Android service metrics straight onto the main PlayerScreen."""
         player_screen = self.root.get_screen('player_screen')
-        
-        # Do not overwrite layout fields if the user is currently dragging the slider thumb
         if player_screen._is_seeking:
             return
 
-        # Variables arrive processed down to clean raw seconds from service context update loops
         player_screen.current_track_title = title
         player_screen.progress_max = duration if duration > 0 else 100
         player_screen.progress_value = position
         player_screen.progress_text = f"{player_screen._format_time(position)} / {player_screen._format_time(duration)}"
-        player_screen.status_text = f"Now playing: {title}" if is_playing else "Playback paused"
+        
+        # Guard layout status string formatting beautifully
+        if is_playing:
+            player_screen.status_text = "Playback active"
+        else:
+            player_screen.status_text = "Playback paused"
 
     def on_start(self):
         if platform == "android":
             try:
-                from android.permissions import request_permissions, Permission
+                from android.permissions import request_permissions
                 
-                # ADUSTED: API 34 strict permissions request sequence
                 permissions_to_request = [
                     "android.permission.READ_MEDIA_AUDIO",
                     "android.permission.POST_NOTIFICATIONS",
-                    "android.permission.FOREGROUND_SERVICE"
+                    "android.permission.FOREGROUND_SERVICE",
+                    "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
                 ]
 
                 def permission_callback(permissions, grants):
                     if all(grants):
                         print("All critical audio permissions granted by user.")
-                        self._initialize_broadcast_receiver()
                     else:
-                        print("Permissions denied. Background audio operations limited.")
-                        # Fallback attempt to attach listener anyway
-                        self._initialize_broadcast_receiver()
+                        print("Some permissions denied. Initializing structural fallbacks.")
+                    self._initialize_broadcast_receiver()
 
                 request_permissions(permissions_to_request, permission_callback)
                 
             except Exception as e:
                 print(f"Failed during runtime permission sequencing layout: {e}")
-                # Fallback implementation if permission engine isn't available
                 self._initialize_broadcast_receiver()
 
     def _initialize_broadcast_receiver(self):
-        """Attaches and runs the native receiver listener safely."""
+        """Attaches the UI update listener using explicit native Android 14 security flags."""
+        if platform != "android" or self.ui_receiver:
+            return
+
         try:
-            if platform == "android" and not self.ui_receiver:
-                self.ui_receiver = BroadcastReceiver(
-                    self._process_broadcast_intent, 
-                    actions=['org.example.musicsearch.UI_UPDATE']
-                )
-                self.ui_receiver.start()
-                print("UI Update Broadcast listener attached successfully via native wrapper.")
+            from jnius import autoclass, PythonJavaClass, java_method
+            from android import mActivity
+            
+            Context = autoclass('android.content.Context')
+            IntentFilter = autoclass('android.content.IntentFilter')
+            
+            RECEIVER_NOT_EXPORTED = 2
+            
+            class NativeReceiver(PythonJavaClass):
+                __javainterfaces__ = ['android/content/BroadcastReceiver']
+                __javacontext__ = 'app'
+                
+                def __init__(self, callback):
+                    super().__init__()
+                    self.callback = callback
+                    
+                @java_method('(Landroid/content/Context;Landroid/content/Intent;)V')
+                def onReceive(self, context, intent):
+                    self.callback(context, intent)
+            
+            self.native_receiver_instance = NativeReceiver(self._process_broadcast_intent)
+            filter_instance = IntentFilter('org.example.musicsearch.UI_UPDATE')
+            
+            context = mActivity.getApplicationContext()
+            context.registerReceiver(
+                self.native_receiver_instance, 
+                filter_instance, 
+                RECEIVER_NOT_EXPORTED
+            )
+            
+            self.ui_receiver = True
+            print("Android 14 secure broadcast receiver registered natively with flag 2.")
         except Exception as e:
-            print(f"Error binding native broadcast architecture: {e}")
+            print(f"Error binding native secure broadcast architecture: {e}")
 
     def on_pause(self):
         return True
