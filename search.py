@@ -2,17 +2,37 @@ import os
 import random
 import re
 import requests
+import json
+import time
 from yt_dlp import YoutubeDL
+from jnius import autoclass
 import config  # Importing config directly to reference dynamic attributes
+
+# Core Android Native Dependencies via Pyjnius
+PythonService = autoclass('org.kivy.android.PythonService')
+Intent = autoclass('android.content.Intent')
+MediaPlayer = autoclass('android.media.MediaPlayer')
+AudioManager = autoclass('android.media.AudioManager')
 
 # Fast in-memory cache to prevent constant disk scraping
 _LOCAL_TRACKS_CACHE = []
 
+# Global Playback Tracking Queues & Engine Instances
+media_player = None
+_CURRENT_PLAYLIST = []
+_CURRENT_TITLES = []
+_CURRENT_INDEX = -1
+_IS_PLAYING = False
+_CURRENT_TRACK_TITLE = "No track playing"
+
 
 def get_available_local_music_folders():
     """Queries your dynamic config layer for valid, existing music paths."""
-    folders = config.load_directories()
-    return [folder for folder in folders if folder and os.path.isdir(folder)]
+    try:
+        folders = config.load_directories()
+        return [folder for folder in folders if folder and os.path.isdir(folder)]
+    except Exception:
+        return []
 
 
 def clear_local_cache():
@@ -25,6 +45,7 @@ def _iter_local_tracks():
     """
     Iterates local storage targets cleanly. 
     Uses internal memory caching to keep searches instantaneous.
+    Defends against Android permission restrictions on system roots.
     """
     global _LOCAL_TRACKS_CACHE
     if _LOCAL_TRACKS_CACHE:
@@ -36,19 +57,26 @@ def _iter_local_tracks():
     available_folders = get_available_local_music_folders()
     
     for folder in available_folders:
-        for root, _, files in os.walk(folder):
-            for name in files:
-                ext = os.path.splitext(name)[1].lower()
-                if ext in config.SUPPORTED_EXTENSIONS:
-                    path = os.path.join(root, name)
-                    title = os.path.splitext(name)[0]
-                    track_data = {
-                        "title": title,
-                        "normalized": normalize_text(title),
-                        "path": path,
-                    }
-                    temp_cache.append(track_data)
-                    yield track_data
+        try:
+            # Wrap the walk iteration to protect against restricted permission boundaries
+            for root, _, files in os.walk(folder):
+                for name in files:
+                    ext = os.path.splitext(name)[1].lower()
+                    if ext in config.SUPPORTED_EXTENSIONS:
+                        path = os.path.join(root, name)
+                        title = os.path.splitext(name)[0]
+                        track_data = {
+                            "title": title,
+                            "normalized": normalize_text(title),
+                            "path": path,
+                        }
+                        temp_cache.append(track_data)
+                        yield track_data
+        except PermissionError:
+            # Safely skip root or system locked storage points
+            continue
+        except Exception:
+            continue
                     
     _LOCAL_TRACKS_CACHE = temp_cache
 
@@ -200,7 +228,7 @@ def fetch_youtube_recommendations(query, max_results=5):
                     if entry:
                         title = entry.get("title") or "Recommended Track"
                         # Standardized streaming structure signature using its video url context
-                        video_url = f"https://www.youtube.com/watch?v={entry.get('id')}" if entry.get("id") else entry.get("url")
+                        video_url = f"https://www.youtube.com/watch?v={entry.get('id')}" if entry.get('id') else entry.get('url')
                         
                         if video_url:
                             recommendations.append({
@@ -212,3 +240,129 @@ def fetch_youtube_recommendations(query, max_results=5):
         print(f"YouTube Recommendation fetch silent exception handled: {e}")
 
     return recommendations
+
+
+# =====================================================================
+# Native Android Media Control and IPC Synchronization Additions
+# =====================================================================
+
+def init_media_player():
+    """Instantiates and binds standard configurations to Android MediaPlayer."""
+    global media_player
+    if media_player is None:
+        media_player = MediaPlayer()
+        media_player.setAudioStreamType(AudioManager.STREAM_MUSIC)
+
+
+def play_audio_source(file_path):
+    """Resets the media player pipeline and spins up the chosen file target."""
+    global media_player, _IS_PLAYING
+    try:
+        init_media_player()
+        media_player.reset()
+        media_player.setDataSource(file_path)
+        media_player.prepare()
+        media_player.start()
+        _IS_PLAYING = True
+    except Exception as e:
+        print(f"Background stream engine error: {e}")
+        _IS_PLAYING = False
+
+
+def broadcast_ui_update(track_title, position_ms, duration_ms):
+    """Constructs and dispatches intent payloads to foreground main.py listeners."""
+    try:
+        service_context = PythonService.mService
+        intent = Intent('org.example.musicsearch.UI_UPDATE')
+        
+        # Unify metric durations to seconds for UI constraints mapping
+        pos_sec = int(position_ms // 1000) if position_ms else 0
+        dur_sec = int(duration_ms // 1000) if duration_ms else 0
+        
+        intent.putExtra("is_playing", bool(_IS_PLAYING))
+        intent.putExtra("position", int(pos_sec))
+        intent.putExtra("duration", int(dur_sec))
+        intent.putExtra("title", str(track_title))
+        
+        service_context.sendBroadcast(intent)
+    except Exception as e:
+        pass
+
+
+def handle_incoming_payload(payload_string):
+    """Parses control instructions received from the frontend layout context."""
+    global _CURRENT_PLAYLIST, _CURRENT_TITLES, _CURRENT_INDEX, _IS_PLAYING, _CURRENT_TRACK_TITLE
+    
+    try:
+        data = json.loads(payload_string)
+        command_type = data.get("type")
+        
+        if command_type == "start":
+            _CURRENT_PLAYLIST = data.get("playlist", [])
+            _CURRENT_TITLES = data.get("titles", [])
+            _CURRENT_INDEX = data.get("index", 0)
+            _CURRENT_TRACK_TITLE = _CURRENT_TITLES[_CURRENT_INDEX] if _CURRENT_INDEX < len(_CURRENT_TITLES) else "Track"
+            
+            track_path = data.get("track_path")
+            play_audio_source(track_path)
+            
+        elif command_type == "pause":
+            if media_player:
+                if media_player.isPlaying():
+                    media_player.pause()
+                    _IS_PLAYING = False
+                else:
+                    media_player.start()
+                    _IS_PLAYING = True
+                    
+        elif command_type == "stop":
+            if media_player:
+                media_player.stop()
+                _IS_PLAYING = False
+                
+        elif command_type == "next":
+            if _CURRENT_PLAYLIST and len(_CURRENT_PLAYLIST) > 0:
+                _CURRENT_INDEX = (_CURRENT_INDEX + 1) % len(_CURRENT_PLAYLIST)
+                _CURRENT_TRACK_TITLE = _CURRENT_TITLES[_CURRENT_INDEX]
+                play_audio_source(_CURRENT_PLAYLIST[_CURRENT_INDEX])
+                
+        elif command_type == "previous":
+            if _CURRENT_PLAYLIST and len(_CURRENT_PLAYLIST) > 0:
+                _CURRENT_INDEX = (_CURRENT_INDEX - 1) % len(_CURRENT_PLAYLIST)
+                _CURRENT_TRACK_TITLE = _CURRENT_TITLES[_CURRENT_INDEX]
+                play_audio_source(_CURRENT_PLAYLIST[_CURRENT_INDEX])
+
+    except Exception as e:
+        print(f"Error executing incoming service action target: {e}")
+
+
+if __name__ == "__main__":
+    """Service lifecycle setup monitoring argument updates and stream loops."""
+    init_media_player()
+    
+    # Infinite polling tracking architecture loop
+    while True:
+        # Check context intent parameters passed from Kivy framework layers
+        try:
+            # Look for an environmental variable string mapping initialization argument steps
+            argument_env = os.environ.get('PYTHON_SERVICE_ARGUMENT', '')
+            if argument_env:
+                handle_incoming_payload(argument_env)
+                # Purge context variable key to ensure commands execute strictly once
+                os.environ['PYTHON_SERVICE_ARGUMENT'] = ''
+        except Exception:
+            pass
+
+        # Periodically dispatch interface updates based on MediaPlayer hardware state
+        try:
+            if media_player and _IS_PLAYING:
+                current_pos = media_player.getCurrentPosition()
+                total_dur = media_player.getDuration()
+                broadcast_ui_update(_CURRENT_TRACK_TITLE, current_pos, total_dur)
+            else:
+                # Still broadcast to keep UI elements responsive during pause scenarios
+                broadcast_ui_update(_CURRENT_TRACK_TITLE, 0, 0)
+        except Exception:
+            pass
+            
+        time.sleep(0.4)

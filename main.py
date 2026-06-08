@@ -20,29 +20,9 @@ Builder.load_file(os.path.join(os.path.dirname(__file__), "app_modern.kv"))
 # Inject the standard os module directly into the Kivy KV context parser
 Factory.register('os', module=os)
 
-# Android Specific Process Bridge Interfacing Classes
+# Android Native Intent Listener Initialization
 if platform == "android":
-    from jnius import PythonJavaClass, java_method, autoclass
-    
-    class UIUpdateReceiver(PythonJavaClass):
-        __javainterfaces__ = ['android/content/BroadcastReceiver']
-
-        def __init__(self, callback):
-            super().__init__()
-            self.callback = callback
-
-        @java_method('(Landroid/content/Context;Landroid/content/Intent;)V')
-        def onReceive(self, context, intent):
-            try:
-                is_playing = intent.getBooleanExtra("is_playing", False)
-                position = intent.getIntExtra("position", 0)
-                duration = intent.getIntExtra("duration", 0)
-                title = intent.getStringExtra("title")
-                
-                # Dispatches native metrics back onto Kivy's loop safely
-                self.callback(is_playing, position, duration, title)
-            except Exception as e:
-                print(f"Error handling UI data broadcast update: {e}")
+    from android.broadcast import BroadcastReceiver
 
 
 class SelectableResultButton(Button):
@@ -108,6 +88,18 @@ class PlayerScreen(Screen):
             search_screen.selected_index = search_screen.result_index
             search_screen.play_selected()
 
+    def select_random_result(self):
+        if platform == "android":
+            App.get_running_app().start_android_audio_service({"type": "random"})
+        else:
+            search_screen = self.manager.get_screen('search_screen')
+            if not search_screen.results:
+                return
+            import random
+            search_screen.result_index = random.randint(0, len(search_screen.results) - 1)
+            search_screen.selected_index = search_screen.result_index
+            search_screen.play_selected()
+
     def _start_progress_update(self):
         """Starts tracking timeline increments at fluid 100ms updates (Non-Android Fallback)."""
         if self.progress_update_event:
@@ -153,13 +145,20 @@ class PlayerScreen(Screen):
 
     def on_progress_slider_touch_down(self):
         """Intercepts track timer modification loops."""
-        if platform != "android":
-            self._is_seeking = True
+        self._is_seeking = True
 
     def on_progress_slider_release(self, value):
         """Handles manual audio scrubbing seek actions cleanly using explicit numeric mapping values."""
         if platform == "android":
+            if self.progress_max > 0:
+                seek_pos_ms = int((value / 100) * (self.progress_max * 1000))
+                App.get_running_app().start_android_audio_service({
+                    "type": "seek",
+                    "position": seek_pos_ms
+                })
+            self._is_seeking = False
             return
+
         length = player.player.get_length()
         if length > 0:
             seek_pos = (value / self.progress_max) * length
@@ -233,14 +232,17 @@ class SearchScreen(Screen):
             return
 
         # Fallback to random track if absolute failure occurs
+        self.play_random_fallback_track()
+
+    def play_random_fallback_track(self):
+        """Bridges the gap for KV calls looking to spin up an automated asset fallback."""
         try:
             random_track = search.get_random_track()
             if random_track:
-                self._play_random_track(random_track, f"No direct results found. Spun up asset: {random_track['title']}")
+                self._play_random_track(random_track, f"Spinning up random fallback asset: {random_track['title']}")
                 return
         except Exception:
             pass
-
         self.update_results_empty()
 
     @mainthread
@@ -292,7 +294,6 @@ class SearchScreen(Screen):
             App.get_running_app().start_android_audio_service(payload_data)
         else:
             player_screen.status_text = f"Now playing: {item['title']} ({item['source']})"
-            # Safeguard Desktop playback thread blocking for heavy streams
             def non_android_play_async():
                 success = player.player.play(track_path)
                 self._apply_desktop_playback_status(success)
@@ -367,10 +368,14 @@ class SearchScreen(Screen):
             try:
                 image_url = search.fetch_artist_image(artist or title, title)
                 if image_url:
-                    self.manager.get_screen('player_screen').background_image = image_url
+                    self._update_background_image(image_url)
             except Exception:
                 pass
         threading.Thread(target=fetch, daemon=True).start()
+
+    @mainthread
+    def _update_background_image(self, image_url):
+        self.manager.get_screen('player_screen').background_image = image_url
 
 
 # =========================================================================
@@ -395,6 +400,10 @@ class DeveloperScreen(Screen):
 # THE ROOT APPLICATION APP CONTAINER
 # =========================================================================
 class MusicSearchApp(App):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.ui_receiver = None
+
     def build(self):
         safe_dir = self.get_safe_cache_directory()
         os.makedirs(safe_dir, exist_ok=True)
@@ -420,10 +429,28 @@ class MusicSearchApp(App):
         except Exception as e:
             print(f"Background Audio Service handoff error: {e}")
 
+    def _process_broadcast_intent(self, context, intent):
+        """Unpacks the background stream data and safely sends it to the handler."""
+        try:
+            is_playing = intent.getBooleanExtra("is_playing", False)
+            position = intent.getIntExtra("position", 0)
+            duration = intent.getIntExtra("duration", 0)
+            title = intent.getStringExtra("title") or "Unknown track"
+            
+            self.handle_background_ui_update(is_playing, position, duration, title)
+        except Exception as e:
+            print(f"Error reading background intent data: {e}")
+
     @mainthread
     def handle_background_ui_update(self, is_playing, position, duration, title):
         """Routes background Android service metrics straight onto the main PlayerScreen."""
         player_screen = self.root.get_screen('player_screen')
+        
+        # Do not overwrite layout fields if the user is currently dragging the slider thumb
+        if player_screen._is_seeking:
+            return
+
+        # Variables arrive processed down to clean raw seconds from service context update loops
         player_screen.current_track_title = title
         player_screen.progress_max = duration if duration > 0 else 100
         player_screen.progress_value = position
@@ -434,34 +461,42 @@ class MusicSearchApp(App):
         if platform == "android":
             try:
                 from android.permissions import request_permissions, Permission
-                permissions = []
                 
-                if hasattr(Permission, "READ_MEDIA_AUDIO"):
-                    permissions.append(Permission.READ_MEDIA_AUDIO)
-                if hasattr(Permission, "READ_EXTERNAL_STORAGE"):
-                    permissions.append(Permission.READ_EXTERNAL_STORAGE)
-                    
-                if permissions:
-                    request_permissions(permissions)
+                # ADUSTED: API 34 strict permissions request sequence
+                permissions_to_request = [
+                    "android.permission.READ_MEDIA_AUDIO",
+                    "android.permission.POST_NOTIFICATIONS",
+                    "android.permission.FOREGROUND_SERVICE"
+                ]
+
+                def permission_callback(permissions, grants):
+                    if all(grants):
+                        print("All critical audio permissions granted by user.")
+                        self._initialize_broadcast_receiver()
+                    else:
+                        print("Permissions denied. Background audio operations limited.")
+                        # Fallback attempt to attach listener anyway
+                        self._initialize_broadcast_receiver()
+
+                request_permissions(permissions_to_request, permission_callback)
                 
-                from jnius import autoclass
-                Context = autoclass('android.content.Context')
-                IntentFilter = autoclass('android.content.IntentFilter')
-                activity = autoclass('org.kivy.android.PythonActivity').mActivity
-                
-                self.ui_receiver = UIUpdateReceiver(self.handle_background_ui_update)
-                filter_obj = IntentFilter('org.example.musicsearch.UI_UPDATE')
-                
-                # Android 14+ dynamic receiver context declarations (Not Exported)
-                try:
-                    receiver_flag = Context.RECEIVER_NOT_EXPORTED
-                    activity.registerReceiver(self.ui_receiver, filter_obj, receiver_flag)
-                except AttributeError:
-                    activity.registerReceiver(self.ui_receiver, filter_obj)
-                    
-                print("UI Update Broadcast listener attached successfully.")
             except Exception as e:
-                print(f"Failed to hook up UI update communication channel layout: {e}")
+                print(f"Failed during runtime permission sequencing layout: {e}")
+                # Fallback implementation if permission engine isn't available
+                self._initialize_broadcast_receiver()
+
+    def _initialize_broadcast_receiver(self):
+        """Attaches and runs the native receiver listener safely."""
+        try:
+            if platform == "android" and not self.ui_receiver:
+                self.ui_receiver = BroadcastReceiver(
+                    self._process_broadcast_intent, 
+                    actions=['org.example.musicsearch.UI_UPDATE']
+                )
+                self.ui_receiver.start()
+                print("UI Update Broadcast listener attached successfully via native wrapper.")
+        except Exception as e:
+            print(f"Error binding native broadcast architecture: {e}")
 
     def on_pause(self):
         return True

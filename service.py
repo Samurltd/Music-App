@@ -79,15 +79,15 @@ def update_notification_state(state):
 
 
 def start_foreground_media_notification():
-    """FIX: Binds service to a persistent foreground notification to bypass Android Doze limits."""
-    global _media_session
+    """FIXED: Pass the explicit FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK flag required for Android 14."""
+    global _media_session, _playlist_titles, _current_index, _native_player
     try:
         service = PythonService.mService
         channel_id = 'audio_service_channel'
         
-        # Configure the native System MediaSession token
-        _media_session = MediaSession(service, "MusicSearchMediaSession")
-        _media_session.setActive(True)
+        if not _media_session:
+            _media_session = MediaSession(service, "MusicSearchMediaSession")
+            _media_session.setActive(True)
         
         # Handle modern Android Oreo+ notification channels safely
         if autoclass('android.os.Build$VERSION').SDK_INT >= 26:
@@ -102,22 +102,39 @@ def start_foreground_media_notification():
         else:
             builder = NotificationBuilder(service)
 
-        # Build structural layout notifications panel components
-        builder.setContentTitle("Music Search") \
+        # Pull modern context title text safely
+        title = _playlist_titles[_current_index] if _current_index < len(_playlist_titles) else "No Track Playing"
+        is_playing = _native_player.isPlaying() if _native_player else False
+
+        builder.setContentTitle(title) \
                .setContentText("Media playback active in background") \
-               .setSmallIcon(service.getApplicationInfo().icon)
+               .setSmallIcon(service.getApplicationInfo().icon) \
+               .setVisibility(1) # Notification.VISIBILITY_PUBLIC
                
-        # Register interface notification broadcast hooks
+        # Register notification button intent receiver
         _register_notification_receiver(service)
         
-        # Apply specialized system lockscreen media styling constraints
+        # Retrieve system media control layout resources
+        res_class = autoclass('android.R$drawable')
+        prev_icon = getattr(res_class, 'ic_media_previous')
+        next_icon = getattr(res_class, 'ic_media_next')
+        play_icon = getattr(res_class, 'ic_media_pause' if is_playing else 'ic_media_play')
+
+        builder.addAction(create_playback_action(service, ACTION_PREVIOUS, prev_icon, "Previous", 1))
+        builder.addAction(create_playback_action(service, ACTION_PAUSE, play_icon, "Play/Pause", 2))
+        builder.addAction(create_playback_action(service, ACTION_NEXT, next_icon, "Next", 3))
+
         media_style = MediaStyle()
         media_style.setMediaSession(_media_session.getSessionToken())
+        media_style.setShowActionsInCompactView([0, 1, 2])
         builder.setStyle(media_style)
 
-        # Pin context securely into operating system parameters
-        service.startForeground(1099, builder.build())
-        print("Foreground Media Notification subsystem established successfully.")
+        # ADJUSTED FOR API 34: Pass 2 (FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK) as the third parameter
+        # This keeps the operating system from shutting down or throwing permission exceptions.
+        if autoclass('android.os.Build$VERSION').SDK_INT >= 34:
+            service.startForeground(1099, builder.build(), 2)
+        else:
+            service.startForeground(1099, builder.build())
     except Exception as e:
         print(f"Failed to mount native foreground notification manager layout: {e}")
 
@@ -132,9 +149,8 @@ def broadcast_progress_to_ui():
         intent = Intent(UI_UPDATE_ACTION)
         intent.setPackage(service.getPackageName())
         
-        # Pull live metrics directly out of the Java engine safely
         is_playing = _native_player.isPlaying()
-        current_pos = _native_player.getCurrentPosition() // 1000  # convert ms to seconds
+        current_pos = _native_player.getCurrentPosition() // 1000  # ms to seconds
         duration = _native_player.getDuration() // 1000
         
         title = _playlist_titles[_current_index] if _current_index < len(_playlist_titles) else "Unknown Track"
@@ -186,6 +202,7 @@ def _play_track(path):
         _native_player.start()
         
         update_notification_state(PlaybackState.STATE_PLAYING)
+        start_foreground_media_notification()
         return True
     except Exception as e:
         print(f"Native Java MediaPlayer playback initiation crashed: {e}")
@@ -215,6 +232,15 @@ def _next_track():
     return _play_current_index()
 
 
+def _random_track():
+    global _current_index, _playlist
+    if not _playlist:
+        return False
+    import random
+    _current_index = random.randint(0, len(_playlist) - 1)
+    return _play_current_index()
+
+
 def _pause_resume():
     global _native_player
     if not _native_player:
@@ -226,6 +252,7 @@ def _pause_resume():
         else:
             _native_player.start()
             update_notification_state(PlaybackState.STATE_PLAYING)
+        start_foreground_media_notification()
         return True
     except Exception as e:
         return False
@@ -255,10 +282,17 @@ def _process_command_string(command_json):
             if _native_player:
                 _native_player.stop()
                 update_notification_state(PlaybackState.STATE_STOPPED)
+                start_foreground_media_notification()
         elif command_type == "next":
             _next_track()
         elif command_type == "previous":
             _previous_track()
+        elif command_type == "random":
+            _random_track()
+        elif command_type == "seek":
+            if _native_player:
+                position_ms = payload.get("position", 0)
+                _native_player.seekTo(position_ms)
     except Exception as e:
         print(f"Error parsing runtime command payload: {e}")
 
@@ -281,6 +315,7 @@ class NotificationActionReceiver(PythonJavaClass):
 
 
 def _register_notification_receiver(service):
+    """ADJUSTED FOR API 33/34: Use Context.RECEIVER_NOT_EXPORTED flag dynamically to avoid OS safety exceptions."""
     global _receiver
     if _receiver is not None:
         return
@@ -290,12 +325,22 @@ def _register_notification_receiver(service):
         intent_filter.addAction(ACTION_PREVIOUS)
         intent_filter.addAction(ACTION_PAUSE)
         intent_filter.addAction(ACTION_NEXT)
-        service.registerReceiver(_receiver, intent_filter)
+        
+        # Context.RECEIVER_NOT_EXPORTED value is 2
+        if autoclass('android.os.Build$VERSION').SDK_INT >= 33:
+            service.registerReceiver(_receiver, intent_filter, 2)
+        else:
+            service.registerReceiver(_receiver, intent_filter)
+        print("Secure Broadcast Receiver mounted successfully configuration loops.")
     except Exception as e:
         print(f"JNI Event Broadcast Receiver registration sequence failed: {e}")
 
 
 if __name__ == '__main__':
+    # Initialize basic values to prevent crash if notification draws prior to first intent
+    _playlist_titles = ["Initializing Player..."]
+    _playlist = [""]
+    
     start_foreground_media_notification()
     
     # Process initial launch argument execution handoff payload
@@ -327,4 +372,4 @@ if __name__ == '__main__':
             broadcast_progress_to_ui()
             last_broadcast_time = current_time
             
-        time.sleep(0.2)
+        time.sleep(0.1) # Accelerated sampling interval to capture sequential track requests

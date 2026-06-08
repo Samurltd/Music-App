@@ -1,5 +1,6 @@
 #:kivy 2.0
 #:import os os
+
 # Global navigation bar background macro style to ensure visual consistency
 <NavBar@BoxLayout>:
     orientation: 'horizontal'
@@ -323,6 +324,24 @@
                         size: self.size
                         radius: [dp(10)]
 
+        # Play Random Songs Activation Bar
+        Button:
+            text: "🎲 Play Random Track"
+            size_hint_y: None
+            height: dp(40)
+            background_color: (0, 0, 0, 0)
+            bold: True
+            font_size: '13sp'
+            color: (1, 1, 1, 1)
+            on_release: root.play_random_fallback_track()
+            canvas.before:
+                Color:
+                    rgba: (0.12, 0.53, 0.34, 0.9)
+                RoundedRectangle:
+                    pos: self.pos
+                    size: self.size
+                    radius: [dp(10)]
+
         # Dynamic Status Tracker Row
         Label:
             text: root.status_text
@@ -332,7 +351,7 @@
             halign: 'left'
             valign: 'center'
             text_size: self.width, self.height
-            color: (0.2, 0.83, 0.61, 1) if "found" in root.status_text.lower() else (0.95, 0.6, 0.2, 1)
+            color: (0.2, 0.83, 0.61, 1) if "found" in root.status_text.lower() or "random" in root.status_text.lower() else (0.95, 0.6, 0.2, 1)
 
         # Search Results Panel Frame
         BoxLayout:
