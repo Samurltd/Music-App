@@ -34,4 +34,4 @@ music_search_app/
 │   └── images/
 │       └── dancing_lion.png  # Default Fallback Application Artwork
 ├── buildozer.spec        # Production Android Blueprint & Dependency Mappings
-└── .gitignore            # Deployment Rules Filter File
+└── .gitignore            # Deployment Rules Filter File.
