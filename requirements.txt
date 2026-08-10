@@ -1,5 +1,6 @@
 kivy>=2.2.0
 yt-dlp>=2025.11.16
-
-# Optional system dependency:
-# Install FFmpeg separately so yt-dlp can extract online audio to mp3.
+requests>=2.31.0
+Pillow>=10.0.0
+certifi
+pyjnius

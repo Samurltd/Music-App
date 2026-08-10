@@ -2,23 +2,63 @@ import json
 import os
 import threading
 
-from kivy.app import App
-from kivy.clock import mainthread, Clock
-from kivy.lang import Builder
-from kivy.factory import Factory
-from kivy.properties import ListProperty, NumericProperty, StringProperty
-from kivy.uix.screenmanager import ScreenManager, Screen
-from kivy.uix.button import Button
-from kivy.utils import platform
+KIVY_AVAILABLE = True
+
+try:
+    from kivy.app import App
+    from kivy.clock import mainthread, Clock
+    from kivy.lang import Builder
+    from kivy.factory import Factory
+    from kivy.properties import ListProperty, NumericProperty, StringProperty
+    from kivy.uix.screenmanager import ScreenManager, Screen
+    from kivy.uix.button import Button
+    from kivy.utils import platform
+except Exception as exc:
+    KIVY_AVAILABLE = False
+
+    class App:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self):
+            return None
+
+    def mainthread(fn):
+        return fn
+
+    Clock = None
+    Builder = None
+    Factory = None
+    ListProperty = NumericProperty = StringProperty = lambda *args, **kwargs: None
+
+    class Screen:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class ScreenManager:
+        def add_widget(self, *args, **kwargs):
+            return None
+
+        def get_screen(self, *args, **kwargs):
+            return None
+
+    class Button:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    platform = "linux"
+
+    print(f"Kivy UI runtime unavailable ({exc}); launching direct playback fallback.")
 
 import player
 import search
 
-# 1. Force Kivy to target your modern layout file exclusively
-Builder.load_file(os.path.join(os.path.dirname(__file__), "app_modern.kv"))
+if KIVY_AVAILABLE:
+    # 1. Force Kivy to target your modern layout file exclusively
+    Builder.load_file(os.path.join(os.path.dirname(__file__), "app_modern.kv"))
 
-# Inject the standard os module directly into the Kivy KV context parser
-Factory.register('os', module=os)
+    # Inject the standard os module directly into the Kivy KV context parser
+    Factory.register('os', module=os)
 
 
 class SelectableResultButton(Button):
@@ -574,4 +614,14 @@ class MusicSearchApp(App):
 
 
 if __name__ == "__main__":
-    MusicSearchApp().run()
+    if KIVY_AVAILABLE:
+        MusicSearchApp().run()
+    else:
+        fallback = search.get_random_track()
+        if fallback:
+            track_path = fallback.get('path')
+            title = fallback.get('title') or os.path.basename(track_path)
+            print(f"Playing fallback track: {title}")
+            player.player.play(track_path)
+        else:
+            print("No sample or random fallback track could be resolved.")

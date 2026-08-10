@@ -1,17 +1,49 @@
 import os
 import sys
-from kivy.core.audio import SoundLoader
+import shutil
+import subprocess
+import threading
+import time
+
+# Detect platform
+IS_ANDROID = 'ANDROID_ARGUMENT' in os.environ or 'PYTHON_SERVICE_ARGUMENT' in os.environ
+
+if IS_ANDROID:
+    try:
+        from jnius import autoclass
+        MediaPlayer = autoclass('android.media.MediaPlayer')
+        AudioManager = autoclass('android.media.AudioManager')
+    except Exception:
+        MediaPlayer = None
+else:
+    MediaPlayer = None
+
+try:
+    from kivy.core.audio import SoundLoader
+except Exception:
+    SoundLoader = None
+
 
 class AudioPlayer:
     def __init__(self):
         self.sound = None
+        self.android_player = None
         self.current_track = None
         self.paused = False
-        # Track timestamp when paused to circumvent Kivy's Android position-drop bug
-        self.pause_position = 0.0 
+        self.pause_position = 0.0
+        self._native_process = None
 
     def _cleanup(self):
         """Safely stops, releases system audio streams, and resets state variables."""
+        if self.android_player:
+            try:
+                self.android_player.stop()
+                self.android_player.reset()
+                self.android_player.release()
+            except Exception:
+                pass
+            self.android_player = None
+
         if self.sound:
             try:
                 self.sound.stop()
@@ -19,74 +51,162 @@ class AudioPlayer:
             except Exception:
                 pass
             self.sound = None
-            self.current_track = None
-            self.paused = False
-            self.pause_position = 0.0
+
+        if self._native_process:
+            try:
+                self._native_process.terminate()
+            except Exception:
+                pass
+            self._native_process = None
+
+        self.current_track = None
+        self.paused = False
+        self.pause_position = 0.0
 
     def play(self, path):
-        """
-        Loads and initiates audio track streams.
-        Supports absolute local files and network audio endpoints cleanly.
-        """
+        """Loads and initiates audio streams on Android and Desktop."""
         if not path:
             return False
-            
-        # Verify local file existences; bypass verification for web network URLs
+
         if not path.startswith(('http://', 'https://')) and not os.path.isfile(path):
             return False
 
-        # If the same track is paused, treat this play command as a resume action
         if path == self.current_track and self.paused:
             self.resume()
             return True
 
         self._cleanup()
 
-        try:
-            sound = SoundLoader.load(path)
-            if not sound:
-                return False
-                
-            self.sound = sound
+        # 1. Android Native MediaPlayer Backend
+        if IS_ANDROID and MediaPlayer is not None:
+            try:
+                mp = MediaPlayer()
+                mp.setAudioStreamType(AudioManager.STREAM_MUSIC)
+                mp.setDataSource(path)
+                mp.prepare()
+                mp.start()
+
+                self.android_player = mp
+                self.current_track = path
+                self.paused = False
+                return True
+            except Exception as e:
+                self._cleanup()
+
+        # 2. Desktop Kivy SoundLoader Backend
+        if SoundLoader is not None:
+            try:
+                sound = SoundLoader.load(path)
+                if sound:
+                    self.sound = sound
+                    self.current_track = path
+                    self.sound.play()
+                    self.paused = False
+                    return True
+            except Exception:
+                pass
+
+        # 3. Desktop CLI Fallback (ffplay, vlc, aplay)
+        fallback = self._launch_native_audio(path)
+        if fallback:
             self.current_track = path
-            self.sound.play()
             self.paused = False
-            self.pause_position = 0.0
+            return True
+
+        return False
+
+    def _launch_native_audio(self, path):
+        """Desktop CLI player launcher."""
+        if IS_ANDROID or path.startswith(('http://', 'https://')):
+            return False
+
+        player_candidates = ['ffplay', 'mpg123', 'aplay', 'vlc']
+        exe = None
+        for candidate in player_candidates:
+            resolved = shutil.which(candidate)
+            if resolved:
+                exe = resolved
+                break
+
+        if not exe:
+            return False
+
+        try:
+            if exe.endswith('vlc'):
+                cmd = [exe, '--intf', 'dummy', path]
+            elif exe.endswith('aplay'):
+                cmd = [exe, '-q', path]
+            elif exe.endswith('ffplay'):
+                cmd = [exe, '-nodisp', '-autoexit', '-hide_banner', '-loglevel', 'error', path]
+            else:
+                cmd = [exe, path]
+
+            self._native_process = subprocess.Popen(
+                cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
             return True
         except Exception:
             return False
 
     def pause(self):
-        """Saves current position safely before resting the audio pipeline."""
+        """Pauses audio playback cleanly across backends."""
+        if self.android_player and self.android_player.isPlaying():
+            self.pause_position = self.android_player.getCurrentPosition() / 1000.0
+            self.android_player.pause()
+            self.paused = True
+            return
+
         if self.sound and self.sound.state == "play":
-            # Store timestamp directly before execution drops it
             self.pause_position = self.sound.get_pos()
             self.sound.stop()
             self.paused = True
+            return
+
+        if self._native_process and self._native_process.poll() is None:
+            self._native_process.terminate()
+            self.paused = True
 
     def resume(self):
-        """Restores audio pipeline stream directly to the exact point of pause."""
-        if self.sound and self.paused:
+        """Resumes playback from the exact pause point."""
+        if not self.paused or not self.current_track:
+            return
+
+        if self.android_player:
+            self.android_player.start()
+            self.paused = False
+            return
+
+        if self.sound:
             self.sound.play()
-            # Force timeline to catch back up to the stored position marker
             try:
                 self.sound.seek(self.pause_position)
             except Exception:
                 pass
             self.paused = False
+            return
+
+        # Fallback for CLI or total restart
+        self.play(self.current_track)
 
     def stop(self):
-        """Terminates active audio channels cleanly."""
-        if self.sound:
-            self.stop_audio_pipeline()
-
-    def stop_audio_pipeline(self):
-        """Helper to break locks cleanly without race conditions inside main loops."""
+        """Terminates active audio playback."""
         self._cleanup()
 
     def is_playing(self):
-        """True if actively sending output signals to system speakers."""
-        return self.sound is not None and self.sound.state == "play"
+        """Returns True if audio is actively playing."""
+        if self.android_player:
+            try:
+                return self.android_player.isPlaying()
+            except Exception:
+                return False
+
+        if self.sound:
+            return self.sound.state == "play"
+
+        if self._native_process:
+            return self._native_process.poll() is None
+
+        return False
 
     def is_paused(self):
         return self.paused
@@ -95,43 +215,60 @@ class AudioPlayer:
         return self.current_track
 
     def get_position(self):
-        """Returns the current runtime position marker in absolute seconds."""
+        """Returns current playback position in seconds."""
+        if self.android_player:
+            try:
+                return self.android_player.getCurrentPosition() / 1000.0
+            except Exception:
+                return 0.0
+
         if self.sound:
             if self.paused:
                 return self.pause_position
             return self.sound.get_pos()
+
         return 0.0
 
     def get_length(self):
-        """Returns total duration of file container in seconds."""
+        """Returns total duration in seconds."""
+        if self.android_player:
+            try:
+                return self.android_player.getDuration() / 1000.0
+            except Exception:
+                return 0.0
+
         if self.sound and self.sound.length > 0:
             return self.sound.length
+
         return 0.0
 
+    def get_track_title(self):
+        if self.current_track:
+            return os.path.basename(self.current_track)
+        return "No track playing"
+
     def seek(self, position):
-        """
-        Scrubs timeline position securely.
-        Handles runtime dynamic adjustments while playing or paused.
-        """
-        if not self.sound:
-            return False
-            
-        try:
-            length = self.get_length()
-            if length > 0 and position > length:
-                position = length
-            if position < 0:
-                position = 0.0
-
-            if self.paused:
-                # If paused, update our state tracking variable so resume hits the new marker
-                self.pause_position = float(position)
+        """Seeks to target time in seconds."""
+        if self.android_player:
+            try:
+                ms = int(position * 1000)
+                self.android_player.seekTo(ms)
                 return True
-            else:
-                self.sound.seek(float(position))
-                return True
-        except Exception:
-            return False
+            except Exception:
+                return False
 
-# Singleton application export instance
+        if self.sound:
+            try:
+                if self.paused:
+                    self.pause_position = float(position)
+                else:
+                    self.sound.seek(float(position))
+                return True
+            except Exception:
+                return False
+
+        return False
+
+
+# Singleton export instance
 player = AudioPlayer()

@@ -12,17 +12,17 @@ package.domain = org.example
 # (string) Source code directory
 source.dir = .
 
-# Added common audio extensions so local assets are successfully packaged
+# Common source extensions to include
 source.include_exts = py, kv, ttf, png, jpg, mp3, wav, ogg, m4a
 
-# (list) List of directories to exclude
+# List of directories to exclude
 source.exclude_dirs = __pycache__, build_env, .buildozer, bin, .git
 
 # (string) Application version
 version = 0.1
 
-# Consolidated requirements: added android, pyjnius, and kept ffmpeg/pillow/certifi
-requirements = python3, kivy, yt-dlp, ffmpeg, requests, certifi, pillow, pyjnius, android
+# Core Python packages & Android binders
+requirements = python3, kivy, yt-dlp, ffpyplayer, requests, certifi, pillow, pyjnius, android
 
 # (str) Supported orientations
 orientation = portrait
@@ -30,47 +30,47 @@ orientation = portrait
 # (int) Fullscreen mode (0 for False, 1 for True)
 fullscreen = 0
 
-# Presplash and Icon images paths (leave blank if default or custom not placed yet)
-presplash.filename =
-icon.filename =
+# Presplash and Icon images paths
+presplash.filename = %(source.dir)s/assets/images/dancing_lion.png
+icon.filename = %(source.dir)s/assets/images/dancing_lion.png
 
 # =============================================================================
 # Android specific settings
 # =============================================================================
 
-# (int) Target Android API
+# (int) Target Android API level
 android.api = 34
 
 # (int) Minimum API required
-android.minapi = 21
+android.minapi = 24
 
-# (int) Android NDK API to use
-android.ndk_api = 21
+# (int) Android NDK API level
+android.ndk_api = 24
+
+# Explicitly pin NDK version across both Buildozer and P4A settings
+android.ndk = 25c
+p4a.ndk_version = 25c
 
 # (list) The Android architectures to build for
 android.archs = armeabi-v7a, arm64-v8a
 
-# FIXED: Integrated READ_EXTERNAL_STORAGE to cleanly allow directory traversal across varying device ages
-android.permissions = INTERNET, READ_MEDIA_AUDIO, READ_EXTERNAL_STORAGE, FOREGROUND_SERVICE, FOREGROUND_SERVICE_MEDIA_PLAYBACK, POST_NOTIFICATIONS
+# Complete permission declarations required for API 34 audio services & wake lock
+android.permissions = INTERNET, READ_MEDIA_AUDIO, READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, FOREGROUND_SERVICE, FOREGROUND_SERVICE_MEDIA_PLAYBACK, POST_NOTIFICATIONS, WAKE_LOCK
 
-# ADJUSTED: Enforces explicit application attributes for legacy fallback environments
-android.manifest_attributes = android:requestLegacyExternalStorage="true"
+# Bootstrap configuration for Kivy/SDL2
+p4a.bootstrap = sdl2
 
-# (str) Android bootstrap to use (sdl2 / webview)
-android.bootstrap = sdl2
-
-# (list) List of extra libraries to include
-android.extra_libs = ctypes
-
-# FIX APPLIED: Corrected registration key token to map directly to service.py 
+# Foreground Service declaration (myservice runs service.py)
 android.services = myservice:service.py:foreground
 
-# FIXED: The correct property key name is android.manifest.service_attributes (singular 'service')
-# This successfully injects the explicit mediaPlayback flag into the XML manifest mapping framework.
-android.manifest.service_attributes = android:foregroundServiceType="mediaPlayback"
+# Fixed XML attribute syntax for API 34 foreground service compliance
+android.manifest.service_attributes = myservice:android.foregroundServiceType="mediaPlayback"
 
-# ADJUSTED: Kept perfectly on a single line so the Gradle wrapper parses the layout cleanly
+# Single-line Gradle dependencies required for API 34 media controls & notifications
 android.gradle_dependencies = androidx.media:media:1.6.0, androidx.core:core:1.12.0
+
+# Request legacy external storage for backward compatibility on API 29-30
+android.request_legacy_external_storage = True
 
 
 [buildozer]
@@ -78,5 +78,5 @@ android.gradle_dependencies = androidx.media:media:1.6.0, androidx.core:core:1.1
 # (int) Log level (0 = error only, 1 = info, 2 = debug and big outputs)
 log_level = 2
 
-# (int) Display warning if buildozer is run as root (0 = False, 1 = True)
+# (int) Display warning if buildozer is run as root
 warn_on_root = 1

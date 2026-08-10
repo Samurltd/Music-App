@@ -1,38 +1,81 @@
 import os
 import random
 import re
-import requests
 import json
 import time
 import sys
-from yt_dlp import YoutubeDL
-from jnius import autoclass, PythonJavaClass, java_method
+
+try:
+    import requests
+except Exception:
+    requests = None
+
+try:
+    from yt_dlp import YoutubeDL
+except Exception:
+    YoutubeDL = None
+
+try:
+    from jnius import autoclass, PythonJavaClass, java_method
+except Exception:
+    autoclass = None
+    PythonJavaClass = object
+    java_method = lambda *args, **kwargs: (lambda fn: fn)
 
 import config  # Importing config directly to reference dynamic attributes
 
 # =====================================================================
 # API Key Configuration
 # =====================================================================
-# Replace this string with your actual 32-character Last.fm API developer key.
-# Get a free key immediately from: https://www.lastfm.com/api/account/create
 LASTFM_API_KEY = "your_actual_32_character_lastfm_api_key_here"
 
 # Core Android Native Dependencies via Pyjnius
-PythonService = autoclass('org.kivy.android.PythonService')
-Intent = autoclass('android.content.Intent')
-MediaPlayer = autoclass('android.media.MediaPlayer')
-AudioManager = autoclass('android.media.AudioManager')
+if autoclass is not None:
+    try:
+        PythonService = autoclass('org.kivy.android.PythonService')
+        Intent = autoclass('android.content.Intent')
+        MediaPlayer = autoclass('android.media.MediaPlayer')
+        AudioManager = autoclass('android.media.AudioManager')
 
-# Native Android Notification Layer References for Foreground Audio
-Context = autoclass('android.content.Context')
-NotificationManager = autoclass('android.app.NotificationManager')
-NotificationChannel = autoclass('android.app.NotificationChannel')
-Notification = autoclass('android.app.Notification')
+        # Native Android Notification Layer References for Foreground Audio
+        Context = autoclass('android.content.Context')
+        NotificationManager = autoclass('android.app.NotificationManager')
+        NotificationChannel = autoclass('android.app.NotificationChannel')
+        Notification = autoclass('android.app.Notification')
 
-# Native MediaSession and Metadata Engine Dependencies for Spotify-style UI
-MediaSession = autoclass('android.media.session.MediaSession')
-MediaMetadata = autoclass('android.media.MediaMetadata')
-PlaybackState = autoclass('android.media.session.PlaybackState')
+        # Native MediaSession and Metadata Engine Dependencies for Spotify-style UI
+        MediaSession = autoclass('android.media.session.MediaSession')
+        MediaMetadata = autoclass('android.media.MediaMetadata')
+        PlaybackState = autoclass('android.media.session.PlaybackState')
+        
+        # Version information for Android 14 compatibility
+        VERSION = autoclass('android.os.Build$VERSION')
+    except Exception:
+        PythonService = None
+        Intent = None
+        MediaPlayer = None
+        AudioManager = None
+        Context = None
+        NotificationManager = None
+        NotificationChannel = None
+        Notification = None
+        MediaSession = None
+        MediaMetadata = None
+        PlaybackState = None
+        VERSION = None
+else:
+    PythonService = None
+    Intent = None
+    MediaPlayer = None
+    AudioManager = None
+    Context = None
+    NotificationManager = None
+    NotificationChannel = None
+    Notification = None
+    MediaSession = None
+    MediaMetadata = None
+    PlaybackState = None
+    VERSION = None
 
 # Fast in-memory cache to prevent constant disk scraping
 _LOCAL_TRACKS_CACHE = []
@@ -100,9 +143,8 @@ def init_media_session():
     """Initializes a formal Android MediaSession to unlock native system widgets."""
     global media_session
     try:
-        if media_session is None:
+        if media_session is None and PythonService and PythonService.mService:
             service_instance = PythonService.mService
-            # Instantiate session with a unique hardware tag identification string
             media_session = MediaSession(service_instance, "MusicSearchEngineSession")
             media_session.setActive(True)
     except Exception as e:
@@ -116,7 +158,9 @@ def update_media_session_metadata(title_text):
         if media_session is None:
             init_media_session()
             
-        # Build strict media container blocks containing Track metadata descriptions
+        if media_session is None:
+            return
+
         MetadataBuilder = autoclass('android.media.MediaMetadata$Builder')
         metadata_builder = MetadataBuilder()
         metadata_builder.putString(MediaMetadata.METADATA_KEY_TITLE, str(title_text))
@@ -124,12 +168,10 @@ def update_media_session_metadata(title_text):
         
         media_session.setMetadata(metadata_builder.build())
         
-        # Define current playback state dynamics (Speed, Play/Pause configurations)
         StateBuilder = autoclass('android.media.session.PlaybackState$Builder')
         state_builder = StateBuilder()
         
         current_state = PlaybackState.STATE_PLAYING if _IS_PLAYING else PlaybackState.STATE_PAUSED
-        # Map required action flags to notify subsystem that play control commands are active
         actions = (PlaybackState.ACTION_PLAY | 
                    PlaybackState.ACTION_PAUSE | 
                    PlaybackState.ACTION_SKIP_TO_NEXT | 
@@ -148,13 +190,14 @@ def start_foreground_notification(title_text):
     Applies MediaStyle constraints to integrate tightly with system volume panel trays.
     """
     try:
+        if not PythonService or not PythonService.mService:
+            return
+
         service_instance = PythonService.mService
         channel_id = "music_search_service_channel"
         
-        # Ensure MediaSession state reflects current track values
         update_media_session_metadata(title_text)
         
-        # Build a persistent Notification Channel (Required for Android 8.0+)
         channel = NotificationChannel(
             channel_id, 
             "Music Playback Service", 
@@ -163,29 +206,29 @@ def start_foreground_notification(title_text):
         notification_manager = service_instance.getSystemService(Context.NOTIFICATION_SERVICE)
         notification_manager.createNotificationChannel(channel)
         
-        # Configure the interface builder container properties
         NotificationBuilder = autoclass('android.app.Notification$Builder')
         builder = NotificationBuilder(service_instance, channel_id)
         builder.setContentTitle(str(title_text))
         builder.setContentText("Playing Local Stream Source" if "http" not in str(title_text) else "Streaming Online Source")
         
-        # Pull the default system package asset icon wrapper mapping reference
         app_icon = service_instance.getApplicationInfo().icon
         builder.setSmallIcon(app_icon)
         
-        # CRITICAL HANDSHAKE: Style notification explicitly as MediaStyle bound to our Session Token
-        MediaStyle = autoclass('android.app.Notification$MediaStyle')
-        media_style = MediaStyle()
-        media_style.setMediaSession(media_session.getSessionToken())
-        builder.setStyle(media_style)
+        if media_session:
+            MediaStyle = autoclass('android.app.Notification$MediaStyle')
+            media_style = MediaStyle()
+            media_style.setMediaSession(media_session.getSessionToken())
+            builder.setStyle(media_style)
         
-        # Make the notification responsive in real-time across lockscreens
         builder.setVisibility(Notification.VISIBILITY_PUBLIC)
-        
         built_notification = builder.build()
         
-        # Elevate to foreground process mode using ID 101
-        service_instance.startForeground(101, built_notification)
+        # Check Android 14 (API 34+) requirement for foregroundType
+        if VERSION and VERSION.SDK_INT >= 34:
+            # FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK = 2
+            service_instance.startForeground(101, built_notification, 2)
+        else:
+            service_instance.startForeground(101, built_notification)
     except Exception as e:
         print(f"Foreground elevation bypass applied: {e}")
 
@@ -197,7 +240,6 @@ def get_available_local_music_folders():
         valid_folders = []
         for folder in folders:
             if folder and os.path.isdir(folder):
-                # PROTECT: Prevent OS-level restricted roots from crashing file system evaluations
                 if folder.strip() in ["/", "/data", "/system", "/vendor"]:
                     continue
                 try:
@@ -233,7 +275,6 @@ def _iter_local_tracks():
     for folder in available_folders:
         try:
             for root, dirs, files in os.walk(folder, topdown=True):
-                # PROTECT: Clean directory targets to prevent os.walk tracking descending into restricted areas
                 dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['data', 'system', 'vendor']]
                 for name in files:
                     try:
@@ -259,6 +300,9 @@ def _iter_local_tracks():
 def get_random_track():
     tracks = list(_iter_local_tracks())
     if not tracks:
+        fallback = os.path.join(os.path.dirname(__file__), "assets", "sample_song.wav")
+        if os.path.isfile(fallback):
+            return {"title": "Sample Song", "path": fallback, "source": "local"}
         return None
     track = random.choice(tracks)
     return {"title": track["title"], "path": track["path"], "source": "local"}
@@ -266,7 +310,7 @@ def get_random_track():
 
 def fetch_artist_image(artist_name, song_title):
     """Fetches album visual art configurations using a valid API key."""
-    if not LASTFM_API_KEY or LASTFM_API_KEY in ["your_actual_32_character_lastfm_api_key_here", "0", "None"]:
+    if not LASTFM_API_KEY or LASTFM_API_KEY in ["your_actual_32_character_lastfm_api_key_here", "0", "None"] or requests is None:
         return None
 
     try:
@@ -323,15 +367,15 @@ def _ensure_cache_directory():
 
 def search_online(query):
     """Downloads targeted audio streams via optimized yt-dlp pipelines."""
-    if not query:
+    if not query or YoutubeDL is None:
         return []
     _ensure_cache_directory()
     search_query = f"ytsearch1:{query}"
     
     options = dict(config.YTDLP_OPTIONS)
     options.update({
-        "format": "bestaudio/best",    # CRITICAL: Force resolution of raw audio formats
-        "extract_flat": False,         # CRITICAL: Disable flat extraction so true stream metadata maps
+        "format": "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best",
+        "extract_flat": False,
         "skip_download": False
     })
 
@@ -370,7 +414,7 @@ def search_online(query):
 
 def fetch_youtube_recommendations(query, max_results=5):
     """Queries YouTube search indices to populate recommended streams."""
-    if not query:
+    if not query or YoutubeDL is None:
         return []
 
     search_query = f"ytsearch{max_results}:{query} recommendation"
@@ -398,13 +442,13 @@ def fetch_youtube_recommendations(query, max_results=5):
 
 
 # =====================================================================
-# Native Android Media Control and IPC Synchronization Additions
+# Native Android Media Control and IPC Synchronization
 # =====================================================================
 
 def init_media_player():
     """Instantiates and binds standard configurations to Android MediaPlayer."""
     global media_player
-    if media_player is None:
+    if media_player is None and MediaPlayer is not None:
         media_player = MediaPlayer()
         media_player.setAudioStreamType(AudioManager.STREAM_MUSIC)
 
@@ -428,17 +472,14 @@ def play_audio_source(file_path):
     global media_player, _IS_PLAYING, _listener_keep_alive
     try:
         init_media_player()
+        if not media_player:
+            return
+
         media_player.reset()
-        
-        # Safe binding to local disk cache files or live HTTP endpoints
         media_player.setDataSource(file_path)
         
-        # FIX: Force ALL files to execute via prepareAsync() instead of blocking prepare(). 
-        # This satisfies the internal hardware decoder timing loops and wakes up audio tracks cleanly.
         _listener_keep_alive = PreparedListener(_on_media_prepared_callback)
         media_player.setOnPreparedListener(_listener_keep_alive)
-        
-        # Initiate non-blocking background hardware asset compilation
         media_player.prepareAsync()
         print(f"Media engine buffering target initialized asynchronously: {file_path}")
             
@@ -450,10 +491,10 @@ def play_audio_source(file_path):
 def broadcast_ui_update(track_title, position_ms, duration_ms):
     """Constructs and dispatches intent payloads to foreground main.py listeners."""
     try:
-        service_context = PythonService.mService
-        if service_context is None:
+        if not PythonService or not PythonService.mService:
             return
-            
+
+        service_context = PythonService.mService
         intent = Intent('org.example.musicsearch.UI_UPDATE')
         pos_sec = int(position_ms // 1000) if position_ms else 0
         dur_sec = int(duration_ms // 1000) if duration_ms else 0
@@ -494,7 +535,6 @@ def handle_incoming_payload(payload_string):
                 else:
                     media_player.start()
                     _IS_PLAYING = True
-                # Redraw notification state to reflect playback change (Play vs Pause icon style)
                 start_foreground_notification(_CURRENT_TRACK_TITLE)
                     
         elif command_type == "stop":
@@ -502,6 +542,11 @@ def handle_incoming_payload(payload_string):
                 media_player.stop()
                 _IS_PLAYING = False
             start_foreground_notification("Engine Stopped")
+
+        elif command_type == "seek":
+            target_ms = data.get("position", 0)
+            if media_player:
+                media_player.seekTo(int(target_ms))
                 
         elif command_type == "next":
             if _CURRENT_PLAYLIST and len(_CURRENT_PLAYLIST) > 0:
@@ -522,7 +567,6 @@ def handle_incoming_payload(payload_string):
 
 
 if __name__ == "__main__":
-    # CRITICAL: Capture environment parameters passed on application setup loop cleanly
     argument_env = sys.argv[1] if len(sys.argv) > 1 else ""
     
     init_media_player()
@@ -535,16 +579,21 @@ if __name__ == "__main__":
         except Exception:
             pass
     
-    # FIX: Instantiate and bind live real-time dynamic Android Intent Broadcast Channels
+    # Safe registerReceiver implementation supporting Android 14+ export flags
     try:
-        IntentFilter = autoclass('android.content.IntentFilter')
-        service_context = PythonService.mService
-        
-        _receiver_keep_alive = ServiceCommandReceiver()
-        filter_channel = IntentFilter('org.example.musicsearch.SERVICE_COMMAND')
-        
-        service_context.registerReceiver(_receiver_keep_alive, filter_channel)
-        print("Real-time audio command bridge registered successfully.")
+        if PythonService and PythonService.mService:
+            IntentFilter = autoclass('android.content.IntentFilter')
+            service_context = PythonService.mService
+            
+            _receiver_keep_alive = ServiceCommandReceiver()
+            filter_channel = IntentFilter('org.example.musicsearch.SERVICE_COMMAND')
+            
+            if VERSION and VERSION.SDK_INT >= 33:
+                # RECEIVER_NOT_EXPORTED = 4
+                service_context.registerReceiver(_receiver_keep_alive, filter_channel, 4)
+            else:
+                service_context.registerReceiver(_receiver_keep_alive, filter_channel)
+            print("Real-time audio command bridge registered successfully.")
     except Exception as e:
         print(f"Failed to bind live intent listener: {e}")
     
@@ -562,17 +611,13 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-        # SAFE TRACKING: Guard against IllegalStateException during async buffering
         try:
             if media_player and _IS_PLAYING:
-                # Verify if the hardware decoder has finished preparing and is rendering frames
                 if media_player.isPlaying():
                     current_pos = media_player.getCurrentPosition()
                     total_dur = media_player.getDuration()
                     broadcast_ui_update(_CURRENT_TRACK_TITLE, current_pos, total_dur)
                 else:
-                    # If _IS_PLAYING is marked True but the player is still rendering buffer steps,
-                    # return safe placeholder metrics to prevent native crashes.
                     broadcast_ui_update(_CURRENT_TRACK_TITLE, 0, 100)
             else:
                 broadcast_ui_update(_CURRENT_TRACK_TITLE, 0, 0)
