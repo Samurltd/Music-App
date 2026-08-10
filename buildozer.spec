@@ -21,8 +21,8 @@ source.exclude_dirs = __pycache__, build_env, .buildozer, bin, .git
 # (string) Application version
 version = 0.1
 
-# Core Python packages & Android binders
-requirements = python3, kivy, yt-dlp, ffpyplayer, requests, certifi, pillow, pyjnius, android
+# Core Python packages & Android binders with required native C/FFmpeg dependencies
+requirements = python3, kivy==2.3.0, openssl, ffmpeg, ffpyplayer, yt-dlp, requests, certifi, pillow, pyjnius, android
 
 # (str) Supported orientations
 orientation = portrait
