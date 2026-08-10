@@ -23,5 +23,3 @@ state.db
 .vscode/
 .idea/
 .DS_Store
-.github/workflows
-.gitignore
