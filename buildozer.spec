@@ -44,9 +44,6 @@ android.api = 34
 # (int) Minimum API required
 android.minapi = 24
 
-# (int) Android NDK API level
-android.ndk_api = 24
-
 # Explicitly pin NDK version across both Buildozer and P4A settings
 android.ndk = 25c
 p4a.ndk_version = 25c
@@ -55,7 +52,7 @@ p4a.ndk_version = 25c
 android.archs = armeabi-v7a, arm64-v8a
 
 # Complete permission declarations required for API 34 audio services & wake lock
-android.permissions = INTERNET, READ_MEDIA_AUDIO, READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, FOREGROUND_SERVICE, FOREGROUND_SERVICE_MEDIA_PLAYBACK, POST_NOTIFICATIONS, WAKE_LOCK
+android.permissions = INTERNET, READ_MEDIA_AUDIO, FOREGROUND_SERVICE, FOREGROUND_SERVICE_MEDIA_PLAYBACK, POST_NOTIFICATIONS, WAKE_LOCK
 
 # Bootstrap configuration for Kivy/SDL2
 p4a.bootstrap = sdl2
