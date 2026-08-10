@@ -23,3 +23,5 @@ state.db
 .vscode/
 .idea/
 .DS_Store
+.github/
+.gitignore
