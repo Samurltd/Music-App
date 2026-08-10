@@ -38,6 +38,9 @@ icon.filename = %(source.dir)s/assets/images/dancing_lion.png
 # Android specific settings
 # =============================================================================
 
+# Auto-accept SDK licenses to prevent build failures on CI/CD runners
+android.accept_sdk_license = True
+
 # (int) Target Android API level
 android.api = 34
 

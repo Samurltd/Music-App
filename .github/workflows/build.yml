@@ -23,16 +23,22 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y build-essential ccache git libffi-dev libssl-dev \
           libltdl-dev python3-setuptools libsqlite3-dev zlib1g-dev \
-          openjdk-17-jdk unzip zip
+          openjdk-17-jdk unzip zip autoconf libtool pkg-config cmake
 
-    - name: Install Buildozer and Cython
+    - name: Install Python Build Dependencies
       run: |
-        pip install --upgrade pip
-        pip install buildozer cython==0.29.33
+        pip install --upgrade pip setuptools wheel
+        pip install "cython<3.0.0" buildozer sh
+
+    - name: Auto-accept Android SDK Licenses
+      run: |
+        mkdir -p ~/.android
+        touch ~/.android/repositories.cfg
+        yes | sdkmanager --sdk_root=/home/runner/.buildozer/android/platform/android-sdk "build-tools;34.0.0" "platforms;android-34" || true
 
     - name: Build APK with Buildozer
       run: |
-        buildozer -v android debug
+        yes | buildozer -v android debug
 
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
